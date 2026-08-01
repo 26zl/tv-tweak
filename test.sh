@@ -50,6 +50,8 @@ t "kept() matches a real entry" "yes" \
   "$(if kept com.amazon.tv.launcher; then echo yes; else echo no; fi)"
 
 # Guards the macOS/Linux split between shasum and sha256sum, which `apps` depends on.
+# Reported so CI shows which of the two branches a given runner actually covered.
+if command -v sha256sum >/dev/null 2>&1; then echo "--   sha256 via sha256sum"; else echo "--   sha256 via shasum"; fi
 printf 'firetweak' > "$fixture.bin"
 t "sha256 matches the known digest of 'firetweak'" \
   "1493155f2dd52183bd8c82689436f3099d231b10b001c0bc4387497e35b8cf73" \
