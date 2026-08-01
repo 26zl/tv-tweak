@@ -10,8 +10,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      # Linting the same files twice would say the same thing, and the macOS runner
-      # has no shellcheck. macOS is in the matrix to exercise the shasum code path.
+      # The macOS runner has no shellcheck, and linting the same files twice would report the
+      # same thing. macOS is here for the BSD userland, not for sha256 coverage: that runner
+      # ships sha256sum too, so test.sh checks both implementations directly instead.
       - name: shellcheck
         if: matrix.os == 'ubuntu-latest'
         run: shellcheck firetweak.sh test.sh
