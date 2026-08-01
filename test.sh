@@ -49,6 +49,13 @@ t "kept() matches whole lines only" "no" \
 t "kept() matches a real entry" "yes" \
   "$(if kept com.amazon.tv.launcher; then echo yes; else echo no; fi)"
 
+# Guards the macOS/Linux split between shasum and sha256sum, which `apps` depends on.
+printf 'firetweak' > "$fixture.bin"
+t "sha256 matches the known digest of 'firetweak'" \
+  "1493155f2dd52183bd8c82689436f3099d231b10b001c0bc4387497e35b8cf73" \
+  "$(sha256 "$fixture.bin")"
+rm -f "$fixture.bin"
+
 # The shipped config must not name anything the KEEP guard would refuse anyway.
 # shellcheck disable=SC2013  # package names never contain whitespace
 overlap=$(for p in $(awk '$1 !~ /^#/ && $2 ~ /^[a-z]/ {print $2}' packages.conf | sort -u); do

@@ -6,6 +6,15 @@ set -eu
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 DEVICE=${DEVICE:-}
 ADB=${ADB:-adb}
+# Android Studio installs platform-tools but does not put it on PATH. Only guess when the caller
+# did not name one, so an explicit ADB= still fails loudly instead of being silently replaced.
+if [ "$ADB" = adb ] && ! command -v adb >/dev/null 2>&1; then
+    for c in "$HOME/Library/Android/sdk/platform-tools/adb" \
+             "$HOME/Android/Sdk/platform-tools/adb" \
+             /usr/local/bin/adb /opt/homebrew/bin/adb; do
+        if [ -x "$c" ]; then ADB=$c; break; fi
+    done
+fi
 CONF=${CONF:-$HERE/packages.conf}
 BACKUP_DIR=${BACKUP_DIR:-$HERE/backups}
 DEFAULT_TIERS="ads promo ota cruft"
@@ -74,6 +83,15 @@ put_setting() {
 sh_() { "$ADB" -s "$DEVICE" shell "$@" </dev/null; }
 kept() { printf '%s\n' "$KEEP" | grep -qx "$1"; }
 
+# macOS ships shasum but not sha256sum; most Linux distributions ship the reverse.
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
 # TV-only apps declare LEANBACK_LAUNCHER only; sideloaded phone apps declare LAUNCHER only.
 # Trying just one silently fails to start half of them.
 start_pkg() {
@@ -99,6 +117,8 @@ tier_pkgs() {
 }
 
 connect() {
+    command -v "$ADB" >/dev/null 2>&1 \
+        || die "adb not found. Install Android platform-tools and put it on PATH, or set ADB=/path/to/adb"
     if [ -z "$DEVICE" ]; then
         DEVICE=$("$ADB" devices | awk '$2=="device" {print $1}' | head -2 | tr '\n' ' ')
         case "$DEVICE" in
@@ -214,7 +234,7 @@ cmd_apps() {
         [ -n "$name" ] || continue
         echo "  fetching $name"
         curl -fsSL -o "$tmp/$name.apk" "$url" || die "download failed: $name"
-        got=$(shasum -a 256 "$tmp/$name.apk" | cut -d' ' -f1)
+        got=$(sha256 "$tmp/$name.apk")
         [ "$got" = "$want" ] || die "checksum mismatch for $name — refusing to install"
         "$ADB" -s "$DEVICE" install -r "$tmp/$name.apk" >/dev/null 2>&1 </dev/null \
             && echo "  installed $name" || echo "  FAILED to install $name"

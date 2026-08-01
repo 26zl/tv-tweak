@@ -16,6 +16,12 @@ Needs `adb` and `curl` on the host, and ADB debugging on the stick
 (Settings → My Fire TV → Developer Options). With exactly one device attached it is detected
 automatically.
 
+Android Studio installs `platform-tools` without putting it on `PATH`, so the standard SDK
+locations are checked as a fallback. Set `ADB=/path/to/adb` if yours lives somewhere else.
+
+POSIX `sh`, no bashisms — macOS and Linux both work, and CI runs the checks on both. The device is
+reached over TCP, so Linux needs no udev rules.
+
 ```sh
 export DEVICE=192.168.1.50:5555        # only if several devices are attached
 export EXPECT_SERIAL=XXXXXXXXXXXXXXXX  # refuse to run if DHCP moved that IP; see `info`
@@ -89,10 +95,12 @@ device-metrics-us-2.amazon.com
 *.amazon-adsystem.com
 ```
 
-`com.amazon.vizzini` re-enables itself shortly after every boot — observed anywhere between 40 s
-and 4 minutes of uptime, so there is no safe delay to wait for. Re-run `debloat alexa` once the
-device has settled and confirm with `verify`, which reports it either way. The other 47 packages
-held across reboots.
+`com.amazon.vizzini` re-enables itself repeatedly, not once per boot — observed at 40 s, 275 s and
+700 s of uptime within a single session, the last one right after an app was installed. `logcat`
+shows `DeviceCapabilityServer` rebuilding the Alexa capability registry with `com.amazon.vizzini`
+among its `owningPackages` each time, so package events look like a trigger; that is a hypothesis
+from two coincidences, not a proven cause. Run `verify` after reboots *and* after installing
+anything, and re-run `debloat alexa` when it reports drift. The other 47 packages hold.
 
 There is no public root for this device: the MediaTek bootrom path used by `amonet`/`kamakiri` is
 closed on MT8696.
