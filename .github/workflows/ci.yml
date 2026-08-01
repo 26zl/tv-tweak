@@ -1,0 +1,14 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck firetweak.sh test.sh
+      - name: posix syntax
+        run: sh -n firetweak.sh && sh -n test.sh
+      - name: self-test
+        run: ./test.sh

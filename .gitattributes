@@ -1,0 +1,2 @@
+# Shell scripts must keep LF endings; CRLF turns the shebang into "bad interpreter".
+* text=auto eol=lf

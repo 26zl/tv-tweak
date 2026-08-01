@@ -1,0 +1,11 @@
+backups/
+*.apk
+*.tmp
+
+# editor and OS cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
