@@ -1,168 +1,120 @@
-# Amazon Fire TV Stick Tweak
+# TV Tweak
 
-[![ci](https://github.com/26zl/firestick-tweak/actions/workflows/ci.yml/badge.svg)](https://github.com/26zl/firestick-tweak/actions/workflows/ci.yml)
+[![ci](https://github.com/26zl/tv-tweak/actions/workflows/ci.yml/badge.svg)](https://github.com/26zl/tv-tweak/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Debloat and tune an Amazon Fire TV Stick over ADB. No root, fully reversible, keeps DRM playback
-working.
+Debloat and tune Android TV devices over ADB. No root, fully reversible, keeps DRM playback
+working. One generic POSIX `sh` script; everything that depends on the device lives in a profile
+directory under `devices/`.
 
-Verified on **Fire TV Stick 4K Max (`karat` / `AFTKRT`), Fire OS 8.1.8.0, armeabi-v7a**. The
-package list comes from `pm list packages` on that device, annotated with measured
-`dumpsys meminfo` figures.
+| Profile | Device | Verified on |
+| --- | --- | --- |
+| [`firetv-stick-hd`](devices/firetv-stick-hd/README.md) | Amazon Fire TV Stick 4K Max (`karat` / `AFTKRT`) | Fire OS 8.1.8.0 |
+| [`sharp-4k-googletv`](devices/sharp-4k-googletv/README.md) | Sharp 4K UHDTV (MediaTek MT9676 / `maniatika`) | Google TV, Android 14 |
+
+Every package list was taken from `pm list packages` on the device it names. Generic Android TV
+lists are how Widevine gets broken: `com.amazon.firebat` looks like a service worth killing and is
+the Prime Video app; `com.mediatek.tv.oneworld.tvcenter` looks like bloat and is the HDMI input
+switcher. The logic is `pm disable-user` in a loop — the value is the curated list.
 
 ## Setup
 
-Needs `adb` and `curl` on the host, and ADB debugging on the stick
-(Settings → My Fire TV → Developer Options). With exactly one device attached it is detected
-automatically.
+Needs `adb` and `curl` on the host, and ADB debugging on the device — each profile's README has
+the steps. Android Studio installs `platform-tools` without putting it on `PATH`, so the standard
+SDK locations are checked as a fallback; set `ADB=/path/to/adb` if yours lives somewhere else.
 
-Android Studio installs `platform-tools` without putting it on `PATH`, so the standard SDK
-locations are checked as a fallback. Set `ADB=/path/to/adb` if yours lives somewhere else.
+macOS and Linux both work, and CI runs the checks on both. The device is reached over TCP, so
+Linux needs no udev rules.
 
-POSIX `sh`, no bashisms — macOS and Linux both work, and CI runs the checks on both. The device is
-reached over TCP, so Linux needs no udev rules.
+The profile is picked by matching `ro.product.model` against `devices/*/device.conf`; pass
+`--device <profile>` to choose explicitly. With exactly one device attached, or exactly one
+advertising Android's wireless debugging over mDNS, it is detected automatically:
 
 ```sh
 export DEVICE=192.168.1.50:5555        # only if several devices are attached
-export EXPECT_SERIAL=XXXXXXXXXXXXXXXX  # refuse to run if DHCP moved that IP; see `info`
 ```
 
 ## Usage
 
 ```text
-./firetweak.sh info                  device summary
-./firetweak.sh backup                snapshot which packages are already disabled
-./firetweak.sh debloat [tiers...]    disable packages (default: ads promo ota cruft)
-./firetweak.sh restore               undo everything: packages and settings
-./firetweak.sh perf                  animations off, auto-update off, location off, trim caches
-./firetweak.sh apps                  sideload TV Bro, Obtainium, F-Droid
-./firetweak.sh verify [--deep]       DRM and playback smoke test
-./firetweak.sh status                list currently disabled packages
-./firetweak.sh launch <package>      start an app with no home-screen icon
-./firetweak.sh dns [host|off|show]   system-wide DNS-over-TLS
-./firetweak.sh sleep <min|never>     display-off and device-sleep timers
+./tweak.sh [--device <profile>] <command>
+
+  info                 device summary
+  backup               snapshot which packages are already disabled; pins the device serial
+  debloat [tiers...]   disable packages (default tiers come from the profile)
+  restore              undo everything: packages and settings
+  tune                 apply the profile's settings.conf, trim caches
+  apps                 sideload the profile's apps.conf (checksum-pinned)
+  verify [--deep]      DRM props, protected packages, drift, launcher; --deep launches media apps
+  status               list currently disabled packages
+  launch <package>     start an app with no home-screen icon
+  home [package]       show or set the launcher
+  dns [host|off|show]  system-wide DNS-over-TLS
+  sleep <min|never>    display-off and device-sleep timers
 ```
 
 First run — `verify` first, so you can tell a regression from a pre-existing fault:
 
 ```sh
-./firetweak.sh verify && ./firetweak.sh backup && ./firetweak.sh debloat && ./firetweak.sh perf
-./firetweak.sh verify
+./tweak.sh verify && ./tweak.sh backup && ./tweak.sh debloat && ./tweak.sh tune
+./tweak.sh verify
 ```
 
-## Tiers
+`debloat` appends everything it disables to `backups/<profile>/applied.txt` and every setting
+written goes to `backups/<profile>/settings.txt` with its original value. `restore` reverses
+exactly those, so it stays correct after you edit `packages.conf` and never touches what you had
+already disabled yourself.
 
-| Tier | Default | Effect |
-| --- | --- | --- |
-| `ads` | yes | Content recognition, advertising ID, telemetry emitters |
-| `promo` | yes | Ambient screensaver, autoplaying trailers, store surfaces, Photos/Music |
-| `ota` | yes | Forced-update components that *can* be disabled |
-| `cruft` | yes | Tutorials, notices, stub apps, kids mode |
-| `alexa` | no | Voice remote stops working |
-| `smarthome` | no | Matter, Frustration Free Setup, Whisper\* discovery |
-| `aggressive` | no | Silk, Appstore, ADM push, casting — read `packages.conf` first |
-| `blocked` | never | Documentation only; Fire OS refuses these |
+`backup` also records `ro.serialno`; every later run refuses to touch a device with a different
+serial, which guards against DHCP handing the IP to something else. `EXPECT_SERIAL=` overrides it.
 
-`debloat` appends everything it disables to `backups/applied.txt` and every setting it writes to
-`backups/settings.txt` with the original value. `restore` reverses exactly those, so it stays
-correct after you edit `packages.conf` and never touches what you had already disabled yourself.
+Run `verify` after reboots and after installing anything: some firmware re-enables packages on
+its own, and `verify` reports exactly which ones drifted.
 
-## Limits without root
-
-Twelve packages refuse to be disabled — `pm disable-user` raises
-`SecurityException: Cannot disable a protected package` and `pm uninstall` returns
-`DELETE_FAILED_INTERNAL_ERROR`. Amazon keeps a protected list inside `PackageManagerService`. It
-includes the OTA updater and several metrics packages; they sit in the `blocked` tier for
-reference.
-
-**So the OTA client keeps running.** DNS is the only remaining enforcement point, and it works on
-the device: Fire OS hides the Private DNS menu, but the Android 11 resolver still honours the
-setting.
-
-```sh
-./firetweak.sh dns your-profile.dns.nextdns.io
-```
-
-You need a resolver with a **custom denylist** — general ad blockers do not cover Amazon's update
-CDN. Note this bypasses a local Pi-hole; filter at the router instead if you prefer. Domains to
-deny:
+## Profiles
 
 ```text
-amzdigitaldownloads.edgesuite.net
-softwareupdates.amazon.com
-device-metrics-us.amazon.com
-device-metrics-us-2.amazon.com
-*.amazon-adsystem.com
+devices/<profile>/
+  README.md        what was verified, the tiers, and the device's quirks
+  device.conf      model, device codename, default tiers, accepted launchers, props to verify
+  packages.conf    tiered package list with rationale
+  keep.conf        packages that are never disabled, whatever packages.conf says
+  apps.conf        sideload targets as <package>|<url>|<sha256>; `play` as url opens the store
+  settings.conf    <namespace> <key> <value> lines applied by `tune`
 ```
 
-`com.amazon.vizzini` re-enables itself repeatedly, not once per boot — observed at 40 s, 275 s and
-700 s of uptime within a single session, the last one right after an app was installed. `logcat`
-shows `DeviceCapabilityServer` rebuilding the Alexa capability registry with `com.amazon.vizzini`
-among its `owningPackages` each time, so package events look like a trigger; that is a hypothesis
-from two coincidences, not a proven cause. Run `verify` after reboots *and* after installing
-anything, and re-run `debloat alexa` when it reports drift. The other 47 packages hold.
+Adding a device is adding a directory. Start from `pm list packages` on the device, put the
+launcher, input stack, DRM services and every streaming app in `keep.conf`, and grow
+`packages.conf` from what `dumpsys meminfo` and `dumpsys package` tell you. `test.sh` checks that
+every profile parses, names a launcher, has all of its default tiers, and never lists a kept
+package.
 
-There is no public root for this device: the MediaTek bootrom path used by `amonet`/`kamakiri` is
-closed on MT8696.
+## Safety
 
-## Sideloaded apps
+`keep.conf` is enforced independently of `packages.conf`, so editing the package list cannot
+break playback. `verify` checks the DRM props named in `device.conf`, that nothing kept is
+disabled, that disabled packages stayed disabled, that settings held, that sideloads are present,
+and that the home screen resolves to an accepted launcher. `--deep` also launches each installed
+streaming app; it takes over the TV.
 
-`apps` installs three checksum-pinned APKs and aborts on mismatch. All are `armeabi-v7a` —
-**this device is 32-bit** and rejects `arm64-v8a`.
+`verify` shows the DRM flags are advertised, not that a licence was fetched. Playback was confirmed
+by hand on each verified device after the full debloat and `tune`.
 
-| App | Package | Why |
-| --- | --- | --- |
-| TV Bro 2.1.6 | `com.phlox.tvwebbrowser` | D-pad browser replacing Silk; the `geckoExcluded` build is 6.8 MB against 150 MB, and this device has 1.7 GB RAM |
-| Obtainium 1.6.10 | `dev.imranr.obtainium` | Installs and updates apps from GitHub releases |
-| F-Droid | `org.fdroid.fdroid` | FOSS repository |
-| Mullvad 2026.8 | `net.mullvad.mullvadvpn` | VPN, with a proper leanback icon |
-
-F-Droid declares `LAUNCHER` but not `LEANBACK_LAUNCHER`. Fire OS lists it under Your Apps &
-Channels anyway — unlike stock Android TV, which hides non-leanback apps entirely. Use
-`./firetweak.sh launch <package>` if something does not show up.
-
-**Private DNS keeps working inside the tunnel.** Measured with Mullvad connected: `dumpsys
-connectivity` reports `UsePrivateDns: true` on both `wlan0` and `tun0`, and the resolver kept
-receiving and filtering queries from the device throughout. The denylist above therefore still
-applies while the VPN is up — the profile is matched on the DoT hostname, not on source IP.
-
-The flip side is that the tunnel does not hide DNS from the resolver: queries made while connected
-are still attributed to your profile and logged there.
-
-## Playback safety
-
-`KEEP` in `firetweak.sh` is a hard-coded list — DRM, account and licensing services, remote input,
-streaming apps — that is never disabled regardless of what `packages.conf` says. Editing the config
-cannot break playback.
-
-`verify` checks the DRM services, the `widevine`/`playready`/`hdcp1` flags, that nothing in `KEEP`
-is disabled, that disabled packages stayed disabled, that settings held, and that the home screen
-resolves. `--deep` also launches each installed streaming app; it takes over the TV.
-
-Playback itself was confirmed by hand on the reference device after the full debloat, `perf`, and
-the switch to DNS-over-TLS. `verify` cannot prove that on its own — it shows the DRM flags are
-advertised, not that a licence was fetched.
-
-## Why not an existing tool
-
-`firestrip`, `Fire-Scripts-CLI`, `firestick-loader` and `Fire-Tools` target `mantis`/`tank` on
-Fire OS 6–7; their lists do not match `karat` on Fire OS 8. Running one blind is how Widevine gets
-broken. Concrete example from building this: `com.amazon.firebat` uses 94 MB and looks like a
-service worth killing — it is the Prime Video app.
-
-The logic is `pm disable-user` in a loop. The value is the curated list, and that has to come from
-your device.
+`apps` downloads over HTTPS and aborts on a checksum mismatch; the pins are recorded in each
+`apps.conf` together with the date. Both verified devices are 32-bit (`armeabi-v7a`) and reject
+`arm64-v8a`-only builds.
 
 ## Layout
 
 ```text
-firetweak.sh     the tool
-test.sh          self-test for the parsing logic; no device required
-packages.conf    tiered package list with rationale and measured memory figures
-backups/
+tweak.sh         the tool
+test.sh          self-test for the parsing logic and every profile; no device required
+devices/         one directory per device, see Profiles
+backups/<profile>/
   state-*.txt    what was already disabled before the tool ran
   applied.txt    what the tool disabled; the exact input to `restore`
   settings.txt   every setting written, as `<namespace> <key> <applied> <original>`
+  serial.txt     the device this profile was first used on
 ```
 
 ## License

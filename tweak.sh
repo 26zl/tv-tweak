@@ -1,6 +1,6 @@
 #!/bin/sh
-# firetweak — debloat and tune an Amazon Fire TV Stick over ADB. No root required.
-# Verified against: Fire TV Stick 4K Max (karat / AFTKRT), Fire OS 8.1.8.0, armeabi-v7a.
+# tweak — debloat and tune an Android TV device over ADB. No root required.
+# Everything device-specific lives in devices/<profile>/; the README lists the verified devices.
 set -eu
 
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -15,53 +15,45 @@ if [ "$ADB" = adb ] && ! command -v adb >/dev/null 2>&1; then
         if [ -x "$c" ]; then ADB=$c; break; fi
     done
 fi
-CONF=${CONF:-$HERE/packages.conf}
-BACKUP_DIR=${BACKUP_DIR:-$HERE/backups}
-DEFAULT_TIERS="ads promo ota cruft"
-
-# Packages that must never be disabled: DRM, account/licensing, remote input, video apps.
-# Enforced independently of packages.conf so a bad edit cannot brick playback.
-KEEP='
-android
-com.amazon.ale
-com.amazon.dcp
-com.amazon.device.controllermanager
-com.amazon.firebat
-com.amazon.fireinputdevices
-com.amazon.franktvinput
-com.amazon.identity.auth.device.authorization
-com.amazon.ssm
-com.amazon.ssmsys
-com.amazon.tcomm
-com.amazon.tcomm.client
-com.amazon.tv.ime
-com.amazon.tv.intentsupport
-com.amazon.tv.keypolicymanager
-com.amazon.tv.launcher
-com.amazon.tv.routing
-com.amazon.tv.settings.core
-com.amazon.tv.settings.v2
-com.amazon.webview.chromium
-com.android.systemui
-com.esaba.downloader
-com.mediatek.tvinput
-'
-
-# Candidates for the `verify --deep` smoke test; only the installed ones are launched.
-MEDIA_APPS=${MEDIA_APPS:-'com.amazon.firebat com.netflix.ninja com.disney.disneyplus com.hbo.hbonow com.apple.atve.amazon.appletv org.xbmc.kodi com.amazon.avod com.wbd.stream com.spotify.tv.android'}
-
-# Pinned sideload targets. Checksums recorded 2026-08-01; `apps` refuses on mismatch.
-# Each carries armeabi-v7a code — this device is 32-bit and will reject arm64-only APKs.
-APKS='
-com.phlox.tvwebbrowser|https://github.com/truefedex/tv-bro/releases/download/v2.1.6/tvbro-2.1.6-generic-geckoExcluded.apk|d8634edfe8d94b4fb9a52005d68a090a7f1e85b7f39c2cf01a25dc9dd60942b2
-dev.imranr.obtainium|https://github.com/ImranR98/Obtainium/releases/download/v1.6.10/app-armeabi-v7a-release.apk|2f4ff5227e486af985c665b6615a67effb498d6516662b98096bf1d0c43054cf
-org.fdroid.fdroid|https://f-droid.org/repo/org.fdroid.fdroid_1023052.apk|985f5181d48bb6bafd54083a048b391271e0ab28385881cc41294fb01a222762
-net.mullvad.mullvadvpn|https://github.com/mullvad/mullvadvpn-app/releases/download/android/2026.8/MullvadVPN-2026.8.apk|40b6d740ede6d806bc8849f831b53929e658db6f4325c773d064c601c31e4081
-'
+PROFILE=${PROFILE:-}
+BACKUP_ROOT=${BACKUP_ROOT:-$HERE/backups}
 
 die() { echo "error: $*" >&2; exit 1; }
+profiles() { for d in "$HERE"/devices/*/; do basename "$d"; done | tr '\n' ' '; }
 
-SETTINGS_FILE=${SETTINGS_FILE:-$BACKUP_DIR/settings.txt}
+# stdin is closed: `adb shell` otherwise consumes the caller's stdin, which silently
+# swallows the rest of the input in `while read ... done < file` loops.
+sh_() { "$ADB" -s "$DEVICE" shell "$@" </dev/null; }
+kept() { printf '%s\n' "$KEEP" | grep -qx "$1"; }
+
+# `--device <name>` or PROFILE= picks devices/<name>. Otherwise ro.product.model is matched
+# against every device.conf, which needs a connected device first.
+load_profile() {
+    if [ -z "$PROFILE" ]; then
+        m=$(sh_ getprop ro.product.model | tr -d '\r')
+        for d in "$HERE"/devices/*/; do
+            if grep -qxF "model=\"$m\"" "$d/device.conf" 2>/dev/null; then
+                PROFILE=$(basename "$d"); break
+            fi
+        done
+        [ -n "$PROFILE" ] || die "no profile in devices/ matches model '$m' — pass --device <name>"
+    fi
+    PROFILE_DIR="$HERE/devices/$PROFILE"
+    [ -f "$PROFILE_DIR/device.conf" ] \
+        || die "unknown profile '$PROFILE'; available: $(profiles)"
+    model=; device=; tiers=; launcher=; media_apps=; props=
+    # shellcheck source=/dev/null
+    . "$PROFILE_DIR/device.conf"
+    CONF=${CONF:-$PROFILE_DIR/packages.conf}
+    # Protected packages are enforced independently of packages.conf so a bad edit cannot brick
+    # playback.
+    KEEP=$(grep -v '^#' "$PROFILE_DIR/keep.conf" || true)
+    APPS=$(grep -v '^#' "$PROFILE_DIR/apps.conf" || true)
+    SETTINGS=$(sed 's/#.*//' "$PROFILE_DIR/settings.conf")
+    MEDIA_APPS=${MEDIA_APPS:-$media_apps}
+    BACKUP_DIR=${BACKUP_DIR:-$BACKUP_ROOT/$PROFILE}
+    SETTINGS_FILE=${SETTINGS_FILE:-$BACKUP_DIR/settings.txt}
+}
 
 # Every setting this tool writes is recorded so `verify` can prove it survived a reboot.
 put_setting() {
@@ -70,7 +62,7 @@ put_setting() {
         echo "  FAILED $2"; return 0
     fi
     mkdir -p "$BACKUP_DIR"
-    # Keep the first original ever seen: re-running perf must not record our own value as the
+    # Keep the first original ever seen: re-running tune must not record our own value as the
     # thing to roll back to.
     prev=$(awk -v n="$1" -v k="$2" '$1==n && $2==k {print $4}' "$SETTINGS_FILE" 2>/dev/null || true)
     if [ -n "$prev" ]; then old=$prev; fi
@@ -78,10 +70,6 @@ put_setting() {
     mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
     echo "  $2 = $3"
 }
-# stdin is closed: `adb shell` otherwise consumes the caller's stdin, which silently
-# swallows the rest of the input in `while read ... done < file` loops.
-sh_() { "$ADB" -s "$DEVICE" shell "$@" </dev/null; }
-kept() { printf '%s\n' "$KEEP" | grep -qx "$1"; }
 
 # macOS ships shasum but not sha256sum; most Linux distributions ship the reverse.
 sha256() {
@@ -116,14 +104,30 @@ tier_pkgs() {
     done
 }
 
+# A launcher set with `home` is a preferred activity, which `resolve-activity` ignores on Google
+# TV in favour of the stock launcher's higher priority, so read the preference first.
+home_activity() {
+    pref=$(sh_ dumpsys package preferred-xml | tr -d '\r' | awk '
+        /<item name="/ { sub(/.*<item name="/, ""); sub(/".*/, ""); item = $0 }
+        /android\.intent\.category\.HOME/ && item != "" { print item; exit }')
+    if [ -n "$pref" ]; then echo "$pref"; return 0; fi
+    sh_ 'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0' \
+        | tr -d '\r' | tail -1
+}
+
 connect() {
     command -v "$ADB" >/dev/null 2>&1 \
         || die "adb not found. Install Android platform-tools and put it on PATH, or set ADB=/path/to/adb"
     if [ -z "$DEVICE" ]; then
         DEVICE=$("$ADB" devices | awk '$2=="device" {print $1}' | head -2 | tr '\n' ' ')
+        # Both classic TCP adb and Android 11+ wireless debugging (which moves to a new port on
+        # every boot) advertise themselves over mDNS, so look there before giving up.
+        if [ -z "$DEVICE" ]; then
+            DEVICE=$("$ADB" mdns services 2>/dev/null | awk '$2=="_adb._tcp" || $2=="_adb-tls-connect._tcp" {print $3}' | sort -u | head -2 | tr '\n' ' ')
+        fi
         case "$DEVICE" in
-            '')       die "no device. Set DEVICE=<ip>:5555 or connect one first" ;;
-            *' '*' ') die "several devices attached — set DEVICE to one of: $DEVICE" ;;
+            '')       die "no device. Set DEVICE=<ip>:<port> or connect one first" ;;
+            *' '*' ') die "several devices found — set DEVICE to one of: $DEVICE" ;;
             *)        DEVICE=${DEVICE% } ;;
         esac
     fi
@@ -134,20 +138,25 @@ connect() {
         "$ADB" connect "$DEVICE" >/dev/null 2>&1 || true
         sh_ true >/dev/null 2>&1 && break
         i=$((i + 1))
-        [ "$i" -lt 3 ] || die "no shell on $DEVICE after $i attempts — check ADB debugging, authorisation, and that the stick is awake"
+        [ "$i" -lt 3 ] || die "no shell on $DEVICE after $i attempts — check ADB debugging, authorisation, and that the device is awake"
         "$ADB" disconnect "$DEVICE" >/dev/null 2>&1 || true
         sleep 2
     done
-    # DEVICE is an IP, which DHCP can reassign. Refuse to run `pm` against the wrong host.
-    if [ -n "${EXPECT_SERIAL:-}" ]; then
-        got=$(sh_ getprop ro.serialno | tr -d '\r')
-        [ "$got" = "$EXPECT_SERIAL" ] \
-            || die "$DEVICE reports serial '$got', expected '$EXPECT_SERIAL'"
-    fi
+}
+
+# DEVICE is an IP, which DHCP can reassign. `backup` pins the serial of the device a profile was
+# first used on; refuse to run `pm` against anything else.
+check_serial() {
+    want=${EXPECT_SERIAL:-$(cat "$BACKUP_DIR/serial.txt" 2>/dev/null || true)}
+    [ -n "$want" ] || return 0
+    got=$(sh_ getprop ro.serialno | tr -d '\r')
+    [ "$got" = "$want" ] \
+        || die "$DEVICE reports serial '$got', expected '$want' (profile $PROFILE)"
 }
 
 cmd_info() {
-    sh_ 'getprop ro.product.model; getprop ro.build.version.name; getprop ro.product.cpu.abilist; nproc'
+    echo "profile: $PROFILE ($model)"
+    sh_ 'getprop ro.product.model; getprop ro.product.device; getprop ro.build.version.release; getprop ro.product.cpu.abilist; nproc'
     echo "--- memory ---"; sh_ 'grep -E "MemTotal|MemAvailable" /proc/meminfo'
     echo "--- disabled packages: "; sh_ 'pm list packages -d' | wc -l
 }
@@ -161,12 +170,13 @@ cmd_backup() {
         sh_ 'pm list packages -d' | sed 's/^package://' | tr -d '\r' | sort
     } > "$f"
     ln -sf "$(basename "$f")" "$BACKUP_DIR/latest.txt"
+    [ -s "$BACKUP_DIR/serial.txt" ] || sh_ getprop ro.serialno | tr -d '\r' > "$BACKUP_DIR/serial.txt"
     echo "backup: $f ($(grep -vc '^#' "$f") already-disabled packages)"
 }
 
 cmd_debloat() {
     # shellcheck disable=SC2086  # deliberate word splitting into separate tier arguments
-    if [ $# -eq 0 ]; then set -- $DEFAULT_TIERS; fi
+    if [ $# -eq 0 ]; then set -- $tiers; fi
     [ -f "$BACKUP_DIR/latest.txt" ] || cmd_backup
     prior="$BACKUP_DIR/$(readlink "$BACKUP_DIR/latest.txt")"
     applied="$BACKUP_DIR/applied.txt"
@@ -216,15 +226,14 @@ cmd_restore() {
     rm -f "$SETTINGS_FILE"
 }
 
-cmd_perf() {
-    for k in window_animation_scale transition_animation_scale animator_duration_scale; do
-        put_setting global "$k" 0.0
+cmd_tune() {
+    printf '%s\n' "$SETTINGS" | while read -r ns key value _; do
+        [ -n "$key" ] || continue
+        put_setting "$ns" "$key" "$value"
     done
-    put_setting global ota_disable_automatic_update 1
-    # No location provider on a mains-powered HDMI stick has a legitimate consumer.
-    put_setting secure location_mode 0
     sh_ pm trim-caches 4G >/dev/null 2>&1 && echo "  caches trimmed" || echo "  trim-caches unavailable"
 }
+cmd_perf() { cmd_tune "$@"; }
 
 cmd_apps() {
     tmp=$(mktemp -d)
@@ -232,6 +241,12 @@ cmd_apps() {
     # Fed by redirect, not a pipe: a checksum mismatch must abort the script, not a subshell.
     while IFS='|' read -r name url want; do
         [ -n "$name" ] || continue
+        if [ "$url" = play ]; then
+            sh_ am start -a android.intent.action.VIEW -d "market://details?id=$name" >/dev/null 2>&1 \
+                && echo "  $name: Play Store listing opened on the TV — press Install with the remote" \
+                || echo "  FAILED to open the Play Store for $name"
+            continue
+        fi
         echo "  fetching $name"
         curl -fsSL -o "$tmp/$name.apk" "$url" || die "download failed: $name"
         got=$(sha256 "$tmp/$name.apk")
@@ -239,20 +254,17 @@ cmd_apps() {
         "$ADB" -s "$DEVICE" install -r "$tmp/$name.apk" >/dev/null 2>&1 </dev/null \
             && echo "  installed $name" || echo "  FAILED to install $name"
     done <<EOF
-$APKS
+$APPS
 EOF
 }
 
 cmd_verify() {
     rc=0
-    echo "--- DRM services ---"
-    for s in drm mediadrm; do
-        v=$(sh_ getprop "init.svc.$s" | tr -d '\r')
-        if [ "$v" = running ]; then echo "  ok   $s"; else echo "  FAIL $s ($v)"; rc=1; fi
-    done
-    for k in widevine playready hdcp1; do
-        v=$(sh_ getprop "ro.vendor.amzn_drm.$k" | tr -d '\r')
-        if [ "$v" = yes ]; then echo "  ok   $k"; else echo "  FAIL $k ($v)"; rc=1; fi
+    echo "--- device props ---"
+    for kv in $props; do
+        k=${kv%%=*}; want=${kv#*=}
+        v=$(sh_ getprop "$k" | tr -d '\r')
+        if [ "$v" = "$want" ]; then echo "  ok   $k=$v"; else echo "  FAIL $k is '$v', expected '$want'"; rc=1; fi
     done
 
     echo "--- protected packages enabled ---"
@@ -263,13 +275,13 @@ cmd_verify() {
             echo "  FAIL $p is disabled"; bad=$((bad + 1)); rc=1
         fi
     done
-    model=$(sh_ getprop ro.product.device | tr -d '\r')
-    if [ "$model" != karat ]; then
-        echo "  WARN device is '$model', packages.conf was built for 'karat' — review it first"
+    got=$(sh_ getprop ro.product.device | tr -d '\r')
+    if [ "$got" != "$device" ]; then
+        echo "  WARN device is '$got', profile $PROFILE was built for '$device' — review it first"
     fi
     if [ "$bad" -eq 0 ]; then echo "  ok   none disabled"; fi
 
-    # Drift check: Fire OS re-enables some packages on boot, so "nothing is broken" is not
+    # Drift check: some firmware re-enables packages on boot, so "nothing is broken" is not
     # the same question as "everything we turned off is still off".
     echo "--- packages this tool disabled are still disabled ---"
     applied="$BACKUP_DIR/applied.txt"
@@ -317,16 +329,19 @@ cmd_verify() {
             echo "  --   $pkg not installed (run: $(basename "$0") apps)"
         fi
     done <<EOF
-$APKS
+$APPS
 EOF
 
     echo "--- home screen resolves ---"
-    # The action is required; category alone returns "No activity found" on Fire OS.
-    if sh_ 'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0' \
-        | grep -qi 'com.amazon.tv.launcher'; then
-        echo "  ok   launcher"
+    home=$(home_activity)
+    ok=0
+    for l in $launcher; do
+        case "$home" in "$l"/*) ok=1 ;; esac
+    done
+    if [ "$ok" -eq 1 ]; then
+        echo "  ok   $home"
     else
-        echo "  FAIL no HOME activity"; rc=1
+        echo "  FAIL home is '${home:-none}', expected one of: $launcher"; rc=1
     fi
 
     if [ "${1:-}" = "--deep" ]; then
@@ -366,8 +381,8 @@ cmd_sleep() {
     put_setting secure sleep_timeout "$ms"
 }
 
-# Fire OS hides the Private DNS menu but Android 11's resolver still honours the setting, which
-# makes DNS-over-TLS the only on-device way to block the OTA client that cannot be disabled.
+# Fire OS hides the Private DNS menu but the Android resolver still honours the setting, which
+# makes DNS-over-TLS the only on-device way to block an OTA client that cannot be disabled.
 cmd_dns() {
     case "${1:-show}" in
         show)
@@ -384,7 +399,21 @@ cmd_dns() {
     esac
 }
 
-# F-Droid ships no LEANBACK_LAUNCHER icon, so it never appears on the Fire TV home screen.
+# Google TV has no menu for changing the launcher; the package manager does it without root.
+cmd_home() {
+    case "${1:-show}" in
+        show) home_activity ;;
+        *)
+            comp=$(sh_ 'cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0' \
+                | tr -d '\r' | awk -v p="$1/" 'index($1, p) == 1 {print $1; exit}')
+            [ -n "$comp" ] || die "$1 is not installed or has no HOME activity"
+            sh_ cmd package set-home-activity "$comp" --user 0 >/dev/null 2>&1 || die "could not set $comp as home"
+            echo "home = $comp"
+            ;;
+    esac
+}
+
+# F-Droid ships no LEANBACK_LAUNCHER icon, so it never appears on a TV home screen.
 cmd_launch() {
     [ $# -eq 1 ] || die "usage: launch <package>"
     start_pkg "$1" || die "could not start $1"
@@ -393,33 +422,39 @@ cmd_launch() {
 
 usage() {
     cat <<EOF
-usage: $(basename "$0") <command>
+usage: $(basename "$0") [--device <profile>] <command>
 
   info                 device summary
   backup               snapshot which packages are already disabled
-  debloat [tiers...]   disable packages (default: $DEFAULT_TIERS)
-                       other tiers: alexa smarthome aggressive
+  debloat [tiers...]   disable packages (default tiers come from the profile)
   restore              undo this tool: re-enable its packages and roll settings back
-  perf                 animations off, auto-update off, location off, trim caches
-  apps                 sideload TV Bro, Obtainium, F-Droid (checksum-pinned)
-  verify [--deep]      DRM, protected packages, launcher; --deep also launches media apps
+  tune                 apply the profile's settings.conf, trim caches
+  apps                 sideload the profile's apps.conf (checksum-pinned)
+  verify [--deep]      DRM props, protected packages, drift, launcher; --deep also launches media apps
   status               list currently disabled packages
-  launch <package>     start an app that has no Fire TV home-screen icon (e.g. F-Droid)
-  dns [host|off|show]  system-wide DNS-over-TLS; the only on-device way to block OTA
+  launch <package>     start an app that has no home-screen icon (e.g. F-Droid)
+  home [package]       show or set the launcher
+  dns [host|off|show]  system-wide DNS-over-TLS
   sleep <min|never>    display-off and device-sleep timers (both, or 'show')
 
-env: DEVICE (auto-detected when exactly one is attached), ADB, CONF, BACKUP_DIR, SETTINGS_FILE
-     EXPECT_SERIAL  refuse to run unless ro.serialno matches (guards against DHCP reassignment)
+profiles: $(profiles)
+env: DEVICE (auto-detected when exactly one is attached or advertised over mDNS), ADB, PROFILE,
+     CONF, BACKUP_DIR, SETTINGS_FILE
+     EXPECT_SERIAL  override the serial that backup pins in backups/<profile>/serial.txt
 EOF
 }
 
-# Sourcing with FIRETWEAK_LIB=1 loads the functions without dispatching, for test.sh.
-if [ -n "${FIRETWEAK_LIB:-}" ]; then return 0; fi
+# Sourcing with TWEAK_LIB=1 loads the functions without dispatching, for test.sh.
+if [ -n "${TWEAK_LIB:-}" ]; then return 0; fi
 
+if [ "${1:-}" = --device ]; then
+    [ $# -ge 2 ] || { usage; exit 2; }
+    PROFILE=$2; shift 2
+fi
 [ $# -ge 1 ] || { usage; exit 2; }
 c=$1; shift
 case "$c" in
-    info|backup|debloat|restore|perf|apps|verify|status|launch|dns|sleep) connect; "cmd_$c" "$@" ;;
+    info|backup|debloat|restore|tune|perf|apps|verify|status|launch|home|dns|sleep) connect; load_profile; check_serial; "cmd_$c" "$@" ;;
     help|-h|--help) usage ;;
     *) usage; exit 2 ;;
 esac

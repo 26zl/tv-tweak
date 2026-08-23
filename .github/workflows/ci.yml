@@ -11,14 +11,14 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       # The macOS runner has no shellcheck, and linting the same files twice would report the
       # same thing. macOS is here for the BSD userland, not for sha256 coverage: that runner
       # ships sha256sum too, so test.sh checks both implementations directly instead.
       - name: shellcheck
         if: matrix.os == 'ubuntu-latest'
-        run: shellcheck firetweak.sh test.sh
+        run: shellcheck tweak.sh test.sh
       - name: posix syntax
-        run: sh -n firetweak.sh && sh -n test.sh
+        run: sh -n tweak.sh && sh -n test.sh
       - name: self-test
         run: ./test.sh
