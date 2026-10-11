@@ -62,6 +62,12 @@ put_setting() {
         echo "  FAILED $2"; return 0
     fi
     mkdir -p "$BACKUP_DIR"
+    # An empty read is ambiguous: either the setting was unset, or adb glitched mid-read. Trust it
+    # as "unset" only when the write took effect; otherwise skip the backup line so a later restore
+    # cannot delete a value that was actually present.
+    if [ -z "$old" ] && [ "$(sh_ settings get "$1" "$2" | tr -d '\r')" != "$3" ]; then
+        echo "  $2 = $3 (original unreadable — not recorded for restore)"; return 0
+    fi
     # Keep the first original ever seen: re-running tune must not record our own value as the
     # thing to roll back to.
     prev=$(awk -v n="$1" -v k="$2" '$1==n && $2==k {print $4}' "$SETTINGS_FILE" 2>/dev/null || true)
@@ -205,13 +211,16 @@ cmd_restore() {
     n=0
     while read -r p; do
         [ -n "$p" ] || continue
-        if sh_ pm enable "$p" >/dev/null 2>&1; then
+        if sh_ pm enable --user 0 "$p" >/dev/null 2>&1; then
             echo "  enabled $p"; n=$((n + 1))
         else
             echo "  FAILED  $p"
         fi
     done < "$applied"
     echo "re-enabled $n of $(wc -l < "$applied" | tr -d ' ')"
+    # Drop the restore list so a later `verify` does not read it and report the packages we just
+    # re-enabled as drift. Done before the settings early-return so it runs even with no settings.
+    rm -f "$applied"
 
     [ -s "$SETTINGS_FILE" ] || return 0
     echo "restoring settings:"
