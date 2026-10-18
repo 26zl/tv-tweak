@@ -61,6 +61,7 @@ options, anywhere on the line:
   --deep                verify: also launch each installed media app (takes over the TV)
   --new-device          start a separate record for a second TV of the same model
   --force               change a TV that is not the device its profile was built for
+  --dry-run             show what a command would change; nothing on the TV or in its state changes
   -h, --help            usage; never touches the TV
   --version             print the version
 ```
@@ -69,10 +70,13 @@ Arguments are checked before anything connects: an unknown tier, a hostname that
 cannot use (an IP address, a name without a dot), or anything with shell syntax in it is refused
 with exit code 2.
 
-First run — `verify` first, so you can tell a regression from a pre-existing fault:
+First run — `verify` first, so you can tell a regression from a pre-existing fault, and a dry run
+to see exactly what will change:
 
 ```sh
-./tweak.sh verify && ./tweak.sh backup && ./tweak.sh debloat && ./tweak.sh tune
+./tweak.sh verify
+./tweak.sh debloat --dry-run && ./tweak.sh tune --dry-run
+./tweak.sh backup && ./tweak.sh debloat && ./tweak.sh tune
 ./tweak.sh verify
 ```
 

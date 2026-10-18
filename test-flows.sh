@@ -368,6 +368,30 @@ sed 's/PS8180/PS8190/' "$T/tv-ota/props" > "$T/props.tmp" && mv "$T/props.tmp" "
 t "verify notices a firmware update since the first backup" "yes" \
   "$(run ota verify 2>/dev/null | grep -q 'WARN the firmware changed' && echo yes || echo no)"
 
+# --dry-run shows what would change, and changes nothing on the TV or in its state.
+tv dry
+snap() {
+    disabled dry; ls -R "$T/tv-dry/settings"
+    cat "$T/tv-dry/settings"/*/* "$T/tv-dry/home" "$T/tv-dry/thirdparty" 2>/dev/null || true
+}
+before=$(snap); echo com.example.launcher/.Home >> "$T/tv-dry/home_candidates"; echo com.example.launcher >> "$T/tv-dry/installed"
+for c in "debloat" "debloat alexa" "tune" "dns dns.example.com" "dns auto" "sleep 30" "home com.example.launcher" "apps" "backup"; do
+    # shellcheck disable=SC2086  # c is a command and its arguments
+    t "$c --dry-run exits 0" 0 "$(rc dry $c --dry-run)"
+done
+t "... the TV is untouched" "$before" "$(snap)"
+t "... and no state was written" "none" "$(ls "$T/state-dry" 2>/dev/null || echo none)"
+t "debloat --dry-run lists what it would disable" "yes" \
+  "$(run dry debloat --dry-run | grep -q '^  would disable com.amazon.tv.acr$' && echo yes || echo no)"
+t "tune --dry-run shows each change" "yes" \
+  "$(run dry tune --dry-run | grep -q 'would set window_animation_scale: 1.0 -> 0.0' && echo yes || echo no)"
+run dry debloat >/dev/null 2>&1; run dry tune >/dev/null 2>&1; after=$(snap); list=$(cat "$(state dry)/applied.txt")
+t "restore --dry-run lists what it would undo" "yes" \
+  "$(run dry restore --dry-run | grep -q 'would re-enable com.amazon.tv.acr' && echo yes || echo no)"
+t "... and leaves the TV and the record as they were" "same same" \
+  "$([ "$(snap)" = "$after" ] && echo same) $([ "$(cat "$(state dry)/applied.txt")" = "$list" ] && echo same)"
+t "--dry-run is refused where nothing changes" 2 "$(rc dry verify --dry-run)"
+
 # keep.conf protects whatever the spelling, and a profile that cannot be read safely stops the run.
 copy kc; P=$T/kc/devices/firetv-stick-4k-max-2023
 printf 'ads\tcom.amazon.firebat\t# a bad edit\n' >> "$P/packages.conf"

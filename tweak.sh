@@ -25,7 +25,7 @@ if [ -n "${TWEAK_STATE:-}" ]; then STATE_ROOT=$TWEAK_STATE
 elif [ "$(uname -s)" = Darwin ]; then STATE_ROOT="$HOME/Library/Application Support/tv-tweak"
 else STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/tv-tweak"
 fi
-STATE=; LOGGING=; NEW_DEVICE=; FORCE=
+STATE=; LOGGING=; NEW_DEVICE=; FORCE=; DRY_RUN=
 
 die() { echo "error: $*" >&2; if [ -n "$LOGGING" ]; then log "error: $*"; fi; exit 1; }
 usage_error() { echo "error: $*" >&2; echo "see: $0 --help" >&2; exit 2; }
@@ -227,6 +227,10 @@ put_setting() {
         echo "  FAILED   $2: could not read its current value" >&2; return 1
     fi
     case $old in *"$NL"*) echo "  FAILED   $2: its current value spans lines; left alone" >&2; return 1 ;; esac
+    if [ -n "$DRY_RUN" ]; then
+        if [ "$old" = "$3" ]; then echo "  $2 is already $3"; else echo "  would set $2: $old -> $3"; fi
+        return 0
+    fi
     # "null" is how `settings get` says unset; any other value is kept shell-quoted, spaces and all.
     [ "$old" = null ] || old=$(q "$old")
     # Keep the first original ever seen: re-running tune must not record our own value as the
@@ -348,6 +352,11 @@ migrate_legacy() {
             *) continue ;;
         esac
         if [ -e "$STATE" ]; then echo "note: left $old alone: $STATE already exists" >&2; continue; fi
+        if [ -n "$DRY_RUN" ]; then
+            echo "note: a real run moves this TV's state from $old to $STATE; reading it there for now" >&2
+            STATE=$old; BASELINE="$old/latest.txt"; APPLIED="$old/applied.txt"; SETTINGS_FILE="$old/settings.txt"
+            return 0
+        fi
         mkdir -p "$STATE"
         for f in "$old"/* "$old"/.[!.]*; do
             if [ ! -e "$f" ] && [ ! -L "$f" ]; then continue; fi
@@ -425,6 +434,10 @@ cmd_info() {
 
 cmd_backup() {
     list=$(pkg_list -d) || exit 1
+    if [ -n "$DRY_RUN" ]; then
+        echo "  would record $(printf '%s\n' "$list" | grep -c .) already-disabled packages in $STATE"
+        return 0
+    fi
     mkdir -p "$STATE"
     # The host's clock in UTC: the TV's may be wrong until it syncs, and its output is not trusted
     # for file names.
@@ -452,8 +465,10 @@ cmd_debloat() {
     # shellcheck disable=SC2086  # deliberate word splitting into separate tier arguments
     if [ $# -eq 0 ]; then set -- $tiers; fi
     check_tiers "$@"
-    [ -f "$BASELINE" ] || cmd_backup
-    touch "$APPLIED"
+    if [ -z "$DRY_RUN" ]; then
+        [ -f "$BASELINE" ] || cmd_backup
+        touch "$APPLIED"
+    fi
     off=$(pkg_list -d) || exit 1
     echo "tiers: $*"
     ok=0; already=0; fail=0
@@ -462,6 +477,7 @@ cmd_debloat() {
         if printf '%s\n' "$off" | grep -qxF -- "$p"; then
             already=$((already + 1)); continue
         fi
+        if [ -n "$DRY_RUN" ]; then echo "  would disable $p"; ok=$((ok + 1)); continue; fi
         if out=$(sh_ pm disable-user --user 0 "$p" 2>&1); then
             ok=$((ok + 1)); echo "  disabled $p"
             # Record what this tool actually turned off. Restoring from this list rather than
@@ -475,6 +491,7 @@ cmd_debloat() {
             alive || die "lost the connection to $DEVICE; the $ok disabled so far are recorded — run debloat again when the TV is back"
         fi
     done
+    if [ -n "$DRY_RUN" ]; then echo "would disable $ok, already off $already"; return 0; fi
     echo "disabled $ok, already off $already, failed $fail (restore list: $APPLIED)"
     [ "$fail" -eq 0 ]
 }
@@ -495,6 +512,17 @@ cmd_restore() {
     applied=$APPLIED
     [ -s "$applied" ] || [ -s "$SETTINGS_FILE" ] \
         || die "nothing to restore: no packages or settings recorded in $STATE"
+    if [ -n "$DRY_RUN" ]; then
+        if [ -s "$applied" ]; then
+            while read -r p; do [ -z "$p" ] || echo "  would re-enable $p"; done < "$applied"
+        fi
+        if [ -s "$SETTINGS_FILE" ]; then
+            while read -r ns key val old; do
+                case $old in null|'') echo "  would unset $key" ;; *) echo "  would restore $key = $old" ;; esac
+            done < "$SETTINGS_FILE"
+        fi
+        return 0
+    fi
     gone=; left=0
     # Each list is rewritten with only what could not be undone, so a re-run picks up where this one
     # stopped and verify can still see it; a list goes only once it is empty.
@@ -556,12 +584,23 @@ cmd_tune() {
     done <<EOF
 $SETTINGS
 EOF
-    if sh_ pm trim-caches 4G >/dev/null 2>&1; then echo "  caches trimmed"; else echo "  trim-caches unavailable"; fi
+    if [ -n "$DRY_RUN" ]; then echo "  would trim caches"
+    elif sh_ pm trim-caches 4G >/dev/null 2>&1; then echo "  caches trimmed"
+    else echo "  trim-caches unavailable"
+    fi
     [ "$fail" -eq 0 ]
 }
 cmd_perf() { cmd_tune "$@"; }
 
 cmd_apps() {
+    if [ -n "$DRY_RUN" ]; then
+        while IFS='|' read -r name url _; do
+            [ -z "$name" ] || echo "  would install $name from $url"
+        done <<EOF
+$APPS
+EOF
+        return 0
+    fi
     # Removed by on_exit; an interrupt ends the run through the same path, so the download goes too.
     tmp=$(mktemp -d)
     fail=0
@@ -750,12 +789,14 @@ cmd_dns() {
 # Google TV has no menu for changing the launcher; the package manager does it without root.
 cmd_home() {
     case "${1:-show}" in
-        show) home_activity ;;
+        show) home_activity || die "could not read the launcher from $DEVICE" ;;
         *)
             is_pkg "$1" || die "not a package name: '$1'"
-            comp=$(sh_ 'cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0' \
-                | tr -d '\r' | awk -v p="$1/" 'index($1, p) == 1 {print $1; exit}')
+            list=$(dev 'cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0') \
+                || die "could not list the launchers on $DEVICE"
+            comp=$(printf '%s\n' "$list" | awk -v p="$1/" 'index($1, p) == 1 {print $1; exit}')
             [ -n "$comp" ] || die "$1 is not installed or has no HOME activity"
+            if [ -n "$DRY_RUN" ]; then echo "  would set home to $comp"; return 0; fi
             sh_ cmd package set-home-activity "$comp" --user 0 >/dev/null 2>&1 || die "could not set $comp as home"
             echo "home = $comp"
             ;;
@@ -790,6 +831,7 @@ options, anywhere on the line:
   --deep                verify: also launch each installed media app (takes over the TV)
   --new-device          start a separate record for a second TV of the same model
   --force               change a TV that is not the device its profile was built for
+  --dry-run             show what a command would change; nothing on the TV or in its state changes
   -h, --help            this text; never touches the TV
   --version             print the version
 
@@ -820,6 +862,7 @@ while [ $# -gt 0 ]; do
         --deep)    DEEP=1 ;;
         --new-device) NEW_DEVICE=1 ;;
         --force)   FORCE=1 ;;
+        --dry-run) DRY_RUN=1 ;;
         -*)        usage_error "unknown option '$1'" ;;
         *)  if [ -z "$cmd" ]; then cmd=$1
             elif is_tok "$1"; then args="$args $1"
@@ -831,6 +874,9 @@ done
 [ -n "$cmd" ] || { usage >&2; exit 2; }
 if [ -n "$PROFILE" ] && ! is_profile "$PROFILE"; then usage_error "invalid profile name '$PROFILE'"; fi
 if [ -n "$DEEP" ] && [ "$cmd" != verify ]; then usage_error "--deep only applies to verify"; fi
+case $DRY_RUN:$cmd in
+    1:info|1:verify|1:status|1:launch|1:help) usage_error "--dry-run applies to commands that change something" ;;
+esac
 # shellcheck disable=SC2086  # every argument passed is_tok: no spaces, no glob characters
 set -- $args
 # Arguments are checked here, before connecting, so a typo costs nothing on the TV.
@@ -866,8 +912,12 @@ case $cmd in
     info|verify|status|launch) ;;
     *)  check_known
         case $cmd in restore|backup) ;; *) check_model ;; esac
-        mkdir -p "$STATE"; LOGGING=1
-        log "$cmd$args — tweak $VERSION, $BUILD"
-        echo "state: $STATE" ;;
+        if [ -n "$DRY_RUN" ]; then
+            echo "dry run: nothing on the TV or in $STATE changes"
+        else
+            mkdir -p "$STATE"; LOGGING=1
+            log "$cmd$args — tweak $VERSION, $BUILD"
+            echo "state: $STATE"
+        fi ;;
 esac
 "cmd_$cmd" "$@"
