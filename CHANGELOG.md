@@ -37,6 +37,9 @@ The first version with a number. Earlier states of `main` were unversioned.
   another Android release, or a firmware update since the first backup, is a warning.
 - A run log per TV, and an immutable baseline snapshot.
 - `test-flows.sh`, which runs every command against a simulated TV in CI.
+- `check-pins.sh` and a weekly `pins` workflow that compare the app pins with what each project
+  publishes.
+- When the TV is picked automatically, the tool says which one it used.
 
 ### Fixed
 

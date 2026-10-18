@@ -6,7 +6,7 @@ instead.
 ## Before a pull request
 
 ```sh
-./test.sh && ./test-flows.sh && shellcheck tweak.sh test.sh test-flows.sh
+./test.sh && ./test-flows.sh && shellcheck tweak.sh test.sh test-flows.sh check-pins.sh
 ```
 
 None of these needs a device. CI runs them on Linux and macOS; keep them green.
@@ -33,5 +33,8 @@ another device is how playback breaks. Build it from the device itself.
 5. On the device, in this order: `verify`, `debloat --dry-run`, `debloat`, `tune`, `verify`, play
    something with DRM (Netflix, Prime Video), `restore`, `verify`.
 6. `devices/<profile>/README.md`: what was verified, on which firmware, and the device's quirks.
+
+To change an app pin, take the checksum from the digest the project publishes, note the date in
+`apps.conf`, and run `./check-pins.sh`; the `pins` workflow runs it weekly too.
 
 Leave out serial numbers, IP addresses and DNS hostnames from logs you paste anywhere.

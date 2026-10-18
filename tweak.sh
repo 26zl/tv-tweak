@@ -310,15 +310,18 @@ connect() {
         || die "adb not found. Install Android platform-tools and put it on PATH, or set ADB=/path/to/adb"
     if [ -z "$DEVICE" ]; then
         DEVICE=$("$ADB" devices | awk '$2=="device" {print $1}' | head -2 | tr '\n' ' ')
+        how="the only device adb lists"
         # Both classic TCP adb and Android 11+ wireless debugging (which moves to a new port on
         # every boot) advertise themselves over mDNS, so look there before giving up.
         if [ -z "$DEVICE" ]; then
             DEVICE=$("$ADB" mdns services 2>/dev/null | awk '$2=="_adb._tcp" || $2=="_adb-tls-connect._tcp" {print $3}' | sort -u | head -2 | tr '\n' ' ')
+            how="found over mDNS"
         fi
         case "$DEVICE" in
             '')       die "no device. Set DEVICE=<ip>:<port> or connect one first" ;;
             *' '*' ') die "several devices found — set DEVICE to one of: $DEVICE" ;;
-            *)        DEVICE=${DEVICE% } ;;
+            # Say which TV was picked: anything on the network can advertise itself.
+            *)        DEVICE=${DEVICE% }; echo "using $DEVICE ($how)" >&2 ;;
         esac
     fi
     # A dropped device leaves a stale offline transport that `adb connect` reports as

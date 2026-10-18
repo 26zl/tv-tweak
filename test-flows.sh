@@ -207,6 +207,10 @@ tv other; run other backup >/dev/null
 sed 's/FAKESERIAL0001/FAKESERIAL0002/' "$T/tv-other/props" > "$T/props.tmp" && mv "$T/props.tmp" "$T/tv-other/props"
 t "a TV with another serial is refused" 1 "$(rc other debloat)"
 
+tv auto
+t "an auto-detected device is named" "using 127.0.0.1:5555 (the only device adb lists)" \
+  "$(FAKE_TV=$T/tv-auto FAKE_DEV=$T/dev ADB=$T/bin/adb TWEAK_STATE=$T/state-auto sh "$ROOT/tweak.sh" status 2>&1 >/dev/null | head -1)"
+
 tv gone; touch "$T/tv-gone/unplugged"
 t "no device is an error" 1 "$(rc gone verify)"
 

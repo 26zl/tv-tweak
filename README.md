@@ -193,6 +193,7 @@ set up on your DNS resolver.
 tweak.sh         the tool
 test.sh          self-test for the parsing logic and every profile; no device required
 test-flows.sh    every command end to end against a simulated TV; no device required
+check-pins.sh    compares the app pins with what each project publishes (run weekly by CI)
 devices/         one directory per device, see Profiles
 ```
 

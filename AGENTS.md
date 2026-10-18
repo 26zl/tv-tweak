@@ -11,10 +11,14 @@ Run from the repository root. None of these touches a device or the network.
 - `./test.sh`: profile parsing and the shape of every shipped profile.
 - `./test-flows.sh`: every command end to end against a simulated TV (a fake adb in a temporary
   directory); takes about half a minute.
-- `shellcheck tweak.sh test.sh test-flows.sh`: must be clean.
+- `shellcheck tweak.sh test.sh test-flows.sh check-pins.sh`: must be clean.
 - `sh -n tweak.sh`, and the same with `dash -n` and `busybox sh -n` where available.
 
 CI (`.github/workflows/ci.yml`) runs all of them on ubuntu-latest and macos-latest.
+
+`./check-pins.sh` is the exception: it compares the `apps.conf` pins with what each project
+publishes, so it needs the network and `gh`. The `pins` workflow runs it weekly and whenever a pin
+changes.
 
 ## Structure
 
