@@ -144,7 +144,7 @@ chmod +x "$T/bin/adb" "$T/dev"/*
 
 # tv <name> [profile]: a fresh simulated Fire TV Stick 4K Max built from the profile's own lists.
 tv() {
-    S=$T/tv-$1; P=$ROOT/devices/${2:-firetv-stick-hd}
+    S=$T/tv-$1; P=$ROOT/devices/${2:-firetv-stick-4k-max-2023}
     rm -rf "$S"; mkdir -p "$S/settings/global" "$S/settings/secure" "$S/settings/system"
     {
         awk '$1 !~ /^#/ && NF >= 2 {print $2}' "$P/packages.conf"
@@ -183,7 +183,7 @@ copy() { rm -rf "${T:?}/$1"; mkdir "$T/$1"; cp "$ROOT/tweak.sh" "$T/$1/"; cp -R 
 rc() { if run "$@" >/dev/null 2>&1; then echo 0; else echo $?; fi; }
 disabled() { sort "$T/tv-$1/disabled" | tr '\n' ' ' | sed 's/ $//'; }
 setting() { f=$T/tv-$1/settings/$2/$3; if [ -f "$f" ]; then cat "$f"; else echo null; fi; }
-state() { echo "$T/state-$1/firetv-stick-hd/FAKESERIAL${2:-0001}"; }
+state() { echo "$T/state-$1/firetv-stick-4k-max-2023/FAKESERIAL${2:-0001}"; }
 
 # --- flows -----------------------------------------------------------------------------------------
 tv rt; before=$(disabled rt)
@@ -262,7 +262,7 @@ tv so; run so tune >/dev/null 2>&1; run so dns dns.example.com >/dev/null 2>&1; 
 t "restore rolls settings back when no package was recorded" 0 "$(rc so restore)"
 t "... location, DNS and timers" "3 null null" \
   "$(setting so secure location_mode) $(setting so global private_dns_mode) $(setting so system screen_off_timeout)"
-tv allon; awk '$1 ~ /^(ads|promo|ota|cruft)$/ {print $2}' "$ROOT/devices/firetv-stick-hd/packages.conf" >> "$T/tv-allon/disabled"
+tv allon; awk '$1 ~ /^(ads|promo|ota|cruft)$/ {print $2}' "$ROOT/devices/firetv-stick-4k-max-2023/packages.conf" >> "$T/tv-allon/disabled"
 run allon debloat >/dev/null 2>&1; run allon tune >/dev/null 2>&1
 t "restore works after a debloat that found everything already off" "0 3" \
   "$(rc allon restore) $(setting allon secure location_mode)"
@@ -284,7 +284,7 @@ run ahead tune >/dev/null 2>&1 || true
 rm "$T/tv-ahead/put_then_drop"; run ahead tune >/dev/null 2>&1
 t "a write that lands as the connection drops keeps the real original" "'3'" \
   "$(awk '$2 == "location_mode" {print $4}' "$(state ahead)/settings.txt")"
-copy sp; printf 'global\tdevice_name\tTV\n' >> "$T/sp/devices/firetv-stick-hd/settings.conf"
+copy sp; printf 'global\tdevice_name\tTV\n' >> "$T/sp/devices/firetv-stick-4k-max-2023/settings.conf"
 tv sp; echo "Living Room TV" > "$T/tv-sp/settings/global/device_name"
 TWEAK_SH=$T/sp/tweak.sh run sp tune >/dev/null 2>&1; TWEAK_SH=$T/sp/tweak.sh run sp tune >/dev/null 2>&1
 TWEAK_SH=$T/sp/tweak.sh run sp restore >/dev/null 2>&1
@@ -309,7 +309,7 @@ esac
 FAKE_TV=$T/tv-home FAKE_DEV=$T/dev ADB=$T/bin/adb DEVICE=127.0.0.1:5555 HOME=$T/home XDG_STATE_HOME='' \
     sh "$T/home/tweak.sh" debloat >/dev/null 2>&1
 t "state lives outside the clone by default" "yes no" \
-  "$([ -s "$where/firetv-stick-hd/FAKESERIAL0001/applied.txt" ] && echo yes || echo no) $([ -e "$T/home/backups" ] && echo yes || echo no)"
+  "$([ -s "$where/firetv-stick-4k-max-2023/FAKESERIAL0001/applied.txt" ] && echo yes || echo no) $([ -e "$T/home/backups" ] && echo yes || echo no)"
 
 tv base; run base backup >/dev/null; b=$(cat "$(state base)/baseline.txt")
 run base debloat >/dev/null 2>&1; run base backup >/dev/null
@@ -351,14 +351,31 @@ t "... and with --new-device keeps its own record" "disabled 1" \
 t "... while the first TV can still be restored" "0 3" \
   "$(if both a restore >/dev/null 2>&1; then echo 0; else echo $?; fi) $(setting a secure location_mode)"
 
+# A profile changes only the device it was built for, under its current name.
+tv alias
+t "the old profile name still works" "0" "$(rc alias --device firetv-stick-hd verify)"
+t "... and says what it is now" "yes" \
+  "$(run alias --device firetv-stick-hd verify 2>&1 >/dev/null | grep -q 'now firetv-stick-4k-max-2023' && echo yes || echo no)"
+tv model; before=$(disabled model)
+t "another device's profile is refused for changes" 1 "$(rc model --device sharp-4k-googletv debloat)"
+t "... before anything is disabled" "$before" "$(disabled model)"
+t "... unless --force says it was checked" 0 "$(rc model --device sharp-4k-googletv --force tune)"
+tv fw; sed 's/^ro.build.version.release=11$/ro.build.version.release=12/' "$T/tv-fw/props" > "$T/props.tmp" && mv "$T/props.tmp" "$T/tv-fw/props"
+t "another Android release is a warning, not a stop" "0 yes" \
+  "$(rc fw tune) $(run fw tune 2>&1 >/dev/null | grep -q 'WARN this TV runs Android 12' && echo yes || echo no)"
+tv ota; run ota backup >/dev/null
+sed 's/PS8180/PS8190/' "$T/tv-ota/props" > "$T/props.tmp" && mv "$T/props.tmp" "$T/tv-ota/props"
+t "verify notices a firmware update since the first backup" "yes" \
+  "$(run ota verify 2>/dev/null | grep -q 'WARN the firmware changed' && echo yes || echo no)"
+
 # keep.conf protects whatever the spelling, and a profile that cannot be read safely stops the run.
-copy kc; P=$T/kc/devices/firetv-stick-hd
+copy kc; P=$T/kc/devices/firetv-stick-4k-max-2023
 printf 'ads\tcom.amazon.firebat\t# a bad edit\n' >> "$P/packages.conf"
 sed 's/^com\.amazon\.firebat$/com.amazon.firebat   # Prime Video/' "$P/keep.conf" > "$P/keep.new"; mv "$P/keep.new" "$P/keep.conf"
 tv kc; TWEAK_SH=$T/kc/tweak.sh run kc debloat ads >/dev/null 2>&1 || true
 t "a listed keep.conf entry stays enabled whatever packages.conf says" "enabled" \
   "$(grep -qx com.amazon.firebat "$T/tv-kc/disabled" && echo disabled || echo enabled)"
-copy semi; printf 'ads\tcom.amazon.firebat;\n' >> "$T/semi/devices/firetv-stick-hd/packages.conf"
+copy semi; printf 'ads\tcom.amazon.firebat;\n' >> "$T/semi/devices/firetv-stick-4k-max-2023/packages.conf"
 tv semi; before=$(disabled semi)
 t "a ';' after a package name stops debloat" 1 "$(TWEAK_SH=$T/semi/tweak.sh rc semi debloat ads)"
 t "... before anything is disabled" "$before" "$(disabled semi)"

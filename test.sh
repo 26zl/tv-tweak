@@ -14,7 +14,7 @@ t() {
     fi
 }
 
-PROFILE=firetv-stick-hd; load_profile
+PROFILE=firetv-stick-4k-max-2023; load_profile
 
 fixture=$(mktemp)
 trap 'rm -f "$fixture"' EXIT
@@ -74,7 +74,7 @@ t "unknown profile is rejected" "rejected" \
 lab=$(mktemp -d)
 trap 'rm -rf "$fixture" "$lab"' EXIT
 variant() {
-    rm -rf "$lab/devices/v"; mkdir -p "$lab/devices"; cp -R devices/firetv-stick-hd "$lab/devices/v"
+    rm -rf "$lab/devices/v"; mkdir -p "$lab/devices"; cp -R devices/firetv-stick-4k-max-2023 "$lab/devices/v"
     keep=$lab/devices/v/keep.conf
 }
 loads() { if (HERE=$lab; PROFILE=v; CONF=; load_profile) >/dev/null 2>&1; then echo loads; else echo rejected; fi; }

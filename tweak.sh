@@ -25,7 +25,7 @@ if [ -n "${TWEAK_STATE:-}" ]; then STATE_ROOT=$TWEAK_STATE
 elif [ "$(uname -s)" = Darwin ]; then STATE_ROOT="$HOME/Library/Application Support/tv-tweak"
 else STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/tv-tweak"
 fi
-STATE=; LOGGING=; NEW_DEVICE=
+STATE=; LOGGING=; NEW_DEVICE=; FORCE=
 
 die() { echo "error: $*" >&2; if [ -n "$LOGGING" ]; then log "error: $*"; fi; exit 1; }
 usage_error() { echo "error: $*" >&2; echo "see: $0 --help" >&2; exit 2; }
@@ -111,7 +111,7 @@ conf_lines() {
 
 # device.conf is data, not code: only key="value" lines with known keys and plain characters.
 read_device_conf() {
-    model=; device=; tiers=; launcher=; media_apps=; props=
+    model=; device=; tiers=; launcher=; media_apps=; props=; android=
     while IFS= read -r line; do
         case $line in
             '') continue ;;
@@ -126,6 +126,7 @@ read_device_conf() {
             launcher) launcher=$val ;;
             media_apps) media_apps=$val ;;
             props) props=$val ;;
+            android) android=$val ;;
             *) die "$1: unknown key '$key'" ;;
         esac
     done <<EOF
@@ -134,7 +135,7 @@ EOF
     if [ -z "$model" ] || [ -z "$device" ] || [ -z "$tiers" ] || [ -z "$launcher" ]; then
         die "$1 must set model, device, tiers and launcher"
     fi
-    for x in $tiers; do is_tok "$x" || die "$1: bad tier name '$x'"; done
+    for x in $tiers $android; do is_tok "$x" || die "$1: bad value '$x'"; done
     for x in $launcher $media_apps; do is_pkg "$x" || die "$1: '$x' is not a package name"; done
     for x in $props; do
         if ! is_tok "${x%%=*}" || ! is_tok "${x#*=}"; then die "$1: props wants key=value pairs, got '$x'"; fi
@@ -181,7 +182,12 @@ load_profile() {
                 PROFILE=$(basename "$d"); break
             fi
         done
-        [ -n "$PROFILE" ] || die "no profile in devices/ matches model '$m' — pass --device <name>"
+        [ -n "$PROFILE" ] || die "no profile in devices/ matches model '$m'. Profiles are made per device, and another device's package list can break playback: see 'Adding a device' in the README, or compare one with '$0 --device <profile> verify'"
+    fi
+    # This profile's first name was that of a different device: Amazon also sells a Fire TV Stick HD.
+    if [ "$PROFILE" = firetv-stick-hd ]; then
+        echo "note: profile firetv-stick-hd is now firetv-stick-4k-max-2023 (Fire TV Stick 4K Max, 2nd gen)" >&2
+        PROFILE=firetv-stick-4k-max-2023
     fi
     is_profile "$PROFILE" || die "invalid profile name '$PROFILE'"
     PROFILE_DIR="$HERE/devices/$PROFILE"
@@ -331,29 +337,33 @@ load_state() {
 # Move it the first time its TV is seen, so nothing recorded is lost; the oldest snapshot becomes
 # the baseline.
 migrate_legacy() {
-    old="$HERE/backups/$PROFILE"
-    [ -d "$old" ] || return 0
-    case $(cat "$old/serial.txt" 2>/dev/null || true) in
-        "$SERIAL") ;;
-        '') echo "note: $old has no serial.txt; if it belongs to this TV, move its files to $STATE" >&2; return 0 ;;
-        *) return 0 ;;
-    esac
-    if [ -e "$STATE" ]; then echo "note: left $old alone: $STATE already exists" >&2; return 0; fi
-    mkdir -p "$STATE"
-    for f in "$old"/* "$old"/.[!.]*; do
-        if [ ! -e "$f" ] && [ ! -L "$f" ]; then continue; fi
-        case ${f##*/} in
-            latest.txt|serial.txt) rm -f "$f" ;;
-            state-*) mv "$f" "$STATE/snapshot-${f##*/state-}" ;;
-            *) mv "$f" "$STATE/" ;;
+    names=$PROFILE
+    if [ "$PROFILE" = firetv-stick-4k-max-2023 ]; then names="firetv-stick-hd $PROFILE"; fi
+    for name in $names; do
+        old="$HERE/backups/$name"
+        [ -d "$old" ] || continue
+        case $(cat "$old/serial.txt" 2>/dev/null || true) in
+            "$SERIAL") ;;
+            '') echo "note: $old has no serial.txt; if it belongs to this TV, move its files to $STATE" >&2; continue ;;
+            *) continue ;;
         esac
+        if [ -e "$STATE" ]; then echo "note: left $old alone: $STATE already exists" >&2; continue; fi
+        mkdir -p "$STATE"
+        for f in "$old"/* "$old"/.[!.]*; do
+            if [ ! -e "$f" ] && [ ! -L "$f" ]; then continue; fi
+            case ${f##*/} in
+                latest.txt|serial.txt) rm -f "$f" ;;
+                state-*) mv "$f" "$STATE/snapshot-${f##*/state-}" ;;
+                *) mv "$f" "$STATE/" ;;
+            esac
+        done
+        for f in "$STATE"/snapshot-*; do
+            if [ -e "$f" ]; then cp "$f" "$BASELINE"; fi
+            break
+        done
+        rmdir "$old" "$HERE/backups" 2>/dev/null || true
+        echo "moved this TV's state from $old to $STATE" >&2
     done
-    for f in "$STATE"/snapshot-*; do
-        if [ -e "$f" ]; then cp "$f" "$BASELINE"; fi
-        break
-    done
-    rmdir "$old" "$HERE/backups" 2>/dev/null || true
-    echo "moved this TV's state from $old to $STATE" >&2
 }
 
 # DEVICE is an IP, which DHCP can reassign. A TV this profile has not been used on is refused unless
@@ -365,6 +375,31 @@ check_known() {
         if [ -d "$d" ]; then known="$known $(basename "$d")"; fi
     done
     [ -z "$known" ] || die "this TV (serial $SERIAL) is new to profile $PROFILE, which has been used on:$known. If DEVICE points at the wrong TV, fix that; for a second TV of this model, add --new-device"
+}
+
+# Package lists made on another device are how playback gets broken, so changes need the device the
+# profile was built for; --force is for someone who has compared the profile with this TV.
+check_model() {
+    got=$(dev getprop ro.product.device) || die "could not read ro.product.device from $DEVICE"
+    if [ "$got" != "$device" ]; then
+        [ -n "$FORCE" ] || die "this TV is '$got', but profile $PROFILE was built for '$device'. Another device's package list can break playback: compare first with '$0 --device $PROFILE verify', and add --force only if the profile fits this TV"
+        echo "WARN this TV is '$got', profile $PROFILE was built for '$device' (--force)" >&2
+    fi
+    firmware_warnings >&2
+}
+
+# A profile was checked on one firmware. Another Android release, or a build that changed since the
+# first backup, can rename packages or bring them back.
+firmware_warnings() {
+    if [ -n "$android" ]; then
+        rel=$(dev getprop ro.build.version.release) || die "could not read the Android release from $DEVICE"
+        if [ "$rel" != "$android" ]; then
+            echo "WARN this TV runs Android $rel; profile $PROFILE was verified on Android $android — check its lists with verify"
+        fi
+    fi
+    if [ -s "$STATE/build.txt" ] && [ "$(cat "$STATE/build.txt")" != "$BUILD" ]; then
+        echo "WARN the firmware changed since this TV's first backup ($(cat "$STATE/build.txt") -> $BUILD): packages may have come back or been renamed"
+    fi
 }
 
 # One line per run that changes something, in the TV's state directory.
@@ -577,6 +612,7 @@ cmd_verify() {
     if [ "$got" != "$device" ]; then
         echo "  WARN device is '$got', profile $PROFILE was built for '$device' — review it first"
     fi
+    firmware_warnings | sed 's/^/  /'
     if [ "$bad" -eq 0 ]; then echo "  ok   none disabled"; fi
 
     # Drift check: some firmware re-enables packages on boot, so "nothing is broken" is not
@@ -753,6 +789,7 @@ options, anywhere on the line:
   --device <profile>    use devices/<profile> instead of matching the TV's model
   --deep                verify: also launch each installed media app (takes over the TV)
   --new-device          start a separate record for a second TV of the same model
+  --force               change a TV that is not the device its profile was built for
   -h, --help            this text; never touches the TV
   --version             print the version
 
@@ -782,6 +819,7 @@ while [ $# -gt 0 ]; do
         --device=*) PROFILE=${1#--device=} ;;
         --deep)    DEEP=1 ;;
         --new-device) NEW_DEVICE=1 ;;
+        --force)   FORCE=1 ;;
         -*)        usage_error "unknown option '$1'" ;;
         *)  if [ -z "$cmd" ]; then cmd=$1
             elif is_tok "$1"; then args="$args $1"
@@ -827,6 +865,7 @@ trap 'exit 130' INT TERM HUP
 case $cmd in
     info|verify|status|launch) ;;
     *)  check_known
+        case $cmd in restore|backup) ;; *) check_model ;; esac
         mkdir -p "$STATE"; LOGGING=1
         log "$cmd$args — tweak $VERSION, $BUILD"
         echo "state: $STATE" ;;

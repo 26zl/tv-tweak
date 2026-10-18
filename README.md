@@ -9,7 +9,7 @@ directory under `devices/`.
 
 | Profile | Device | Verified on |
 | --- | --- | --- |
-| [`firetv-stick-hd`](devices/firetv-stick-hd/README.md) | Amazon Fire TV Stick 4K Max (`karat` / `AFTKRT`) | Fire OS 8.1.8.0 |
+| [`firetv-stick-4k-max-2023`](devices/firetv-stick-4k-max-2023/README.md) | Amazon Fire TV Stick 4K Max (`karat` / `AFTKRT`) | Fire OS 8.1.8.0 |
 | [`sharp-4k-googletv`](devices/sharp-4k-googletv/README.md) | Sharp 4K UHDTV (MediaTek MT9676 / `maniatika`) | Google TV, Android 14 |
 
 Every package list was taken from `pm list packages` on the device it names. Generic Android TV
@@ -27,7 +27,11 @@ macOS and Linux both work, and CI runs the checks on both. The device is reached
 Linux needs no udev rules.
 
 The profile is picked by matching `ro.product.model` against `devices/*/device.conf`; pass
-`--device <profile>` to choose explicitly. With exactly one device attached, or exactly one
+`--device <profile>` to choose explicitly. Commands that change the TV refuse one whose
+`ro.product.device` is not the profile's — another device's package list is how playback breaks —
+unless `--force` says you compared the two with `verify` first. A different Android release, or a
+firmware update since the TV's first backup, is reported as a warning. (`firetv-stick-hd` was the
+first name of the Fire TV profile; it still works and points at `firetv-stick-4k-max-2023`.) With exactly one device attached, or exactly one
 advertising Android's wireless debugging over mDNS, it is detected automatically:
 
 ```sh
@@ -55,6 +59,8 @@ export DEVICE=192.168.1.50:5555        # only if several devices are attached
 options, anywhere on the line:
   --device <profile>    use devices/<profile> instead of matching the TV's model
   --deep                verify: also launch each installed media app (takes over the TV)
+  --new-device          start a separate record for a second TV of the same model
+  --force               change a TV that is not the device its profile was built for
   -h, --help            usage; never touches the TV
   --version             print the version
 ```

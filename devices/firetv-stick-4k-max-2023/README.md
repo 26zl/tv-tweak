@@ -11,7 +11,7 @@ advertises itself over mDNS, so `tweak.sh` finds it without `DEVICE=` when it is
 Accept the authorisation prompt on the TV the first time.
 
 ```sh
-./tweak.sh --device firetv-stick-hd verify
+./tweak.sh --device firetv-stick-4k-max-2023 verify
 ```
 
 ## Tiers
