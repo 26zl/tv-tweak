@@ -69,21 +69,56 @@ rm -f "$fixture.bin"
 t "unknown profile is rejected" "rejected" \
   "$( (PROFILE=no-such-device; load_profile) 2>/dev/null && echo accepted || echo rejected)"
 
+# keep.conf is the safety net, so every spelling of an entry must still protect it, and a profile
+# that cannot be read safely must stop the run. Each case edits a scratch copy of the Fire TV profile.
+lab=$(mktemp -d)
+trap 'rm -rf "$fixture" "$lab"' EXIT
+variant() {
+    rm -rf "$lab/devices/v"; mkdir -p "$lab/devices"; cp -R devices/firetv-stick-hd "$lab/devices/v"
+    keep=$lab/devices/v/keep.conf
+}
+loads() { if (HERE=$lab; PROFILE=v; CONF=; load_profile) >/dev/null 2>&1; then echo loads; else echo rejected; fi; }
+protects() { (HERE=$lab; PROFILE=v; CONF=; load_profile; if kept "$1"; then echo yes; else echo no; fi) 2>/dev/null; }
+
+variant; sed 's/^com\.amazon\.firebat$/com.amazon.firebat   # Prime Video/' "$keep" > "$keep.new"; mv "$keep.new" "$keep"
+t "keep.conf: a comment after an entry still protects it" "yes" "$(protects com.amazon.firebat)"
+variant; sed 's/$/\r/' "$keep" > "$keep.new"; mv "$keep.new" "$keep"
+t "keep.conf: CRLF line endings still protect" "yes" "$(protects com.amazon.firebat)"
+variant; sed 's/^com\.amazon\.firebat$/  com.amazon.firebat  /' "$keep" > "$keep.new"; mv "$keep.new" "$keep"
+t "keep.conf: surrounding spaces still protect" "yes" "$(protects com.amazon.firebat)"
+variant
+t "media_apps are protected even when keep.conf omits them" "yes" "$(protects com.netflix.ninja)"
+variant; rm "$keep"
+t "a missing keep.conf stops the run" "rejected" "$(loads)"
+variant; grep '^#' "$keep" > "$keep.new"; mv "$keep.new" "$keep"
+t "a keep.conf with no entries stops the run" "rejected" "$(loads)"
+variant; printf 'ads\tcom.amazon.firebat;\n' >> "$lab/devices/v/packages.conf"
+t "packages.conf: shell syntax after a name stops the run" "rejected" "$(loads)"
+variant; printf 'model="%s(touch %s/ran)"\n' '$' "$lab" >> "$lab/devices/v/device.conf"
+t "device.conf is read as data, never run" "rejected none" "$(loads) $(ls "$lab/ran" 2>/dev/null || echo none)"
+variant; printf 'com.example.app|http://example.com/a.apk|%064d\n' 0 >> "$lab/devices/v/apps.conf"
+t "apps.conf: a plain-http url stops the run" "rejected" "$(loads)"
+variant; printf 'com.example.app|https://example.com/a.apk|\n' >> "$lab/devices/v/apps.conf"
+t "apps.conf: a missing checksum stops the run" "rejected" "$(loads)"
+variant; printf 'global\tfoo\tbar;reboot\n' >> "$lab/devices/v/settings.conf"
+t "settings.conf: shell syntax in a value stops the run" "rejected" "$(loads)"
+
 # Every shipped profile must parse, name a launcher, and not list anything its own keep list
 # would refuse anyway.
 for d in devices/*/; do
     p=$(basename "$d")
-    CONF=
+    CONF=; MEDIA_APPS=
     PROFILE=$p; load_profile
     t "$p: device.conf names a model and launcher" "yes" \
       "$(if [ -n "$model" ] && [ -n "$launcher" ]; then echo yes; else echo no; fi)"
     t "$p: default tiers exist in packages.conf" "" \
       "$(for tier in $tiers; do awk -v t="$tier" '$1==t' "$CONF" | grep -q . || echo "$tier"; done)"
-    # shellcheck disable=SC2013  # package names never contain whitespace
-    overlap=$(for pkg in $(awk '$1 !~ /^#/ && $2 ~ /^[a-z]/ {print $2}' "$CONF" | sort -u); do
-        if kept "$pkg"; then echo "$pkg"; fi
-    done)
-    t "$p: packages.conf does not fight keep.conf" "" "$overlap"
+    # Read independently of kept(), so a parsing bug there cannot hide an overlap here.
+    overlap=$(conf_lines "$CONF" | awk '{print $2}' | LC_ALL=C sort -u > "$lab/pkgs"
+              # shellcheck disable=SC2086  # media_apps is a space-separated list of package names
+              { conf_lines "$d/keep.conf"; printf '%s\n' $media_apps; } | LC_ALL=C sort -u > "$lab/keep"
+              LC_ALL=C comm -12 "$lab/pkgs" "$lab/keep")
+    t "$p: packages.conf does not fight keep.conf or media_apps" "" "$overlap"
     t "$p: apps.conf entries are <pkg>|<url>|<sha256> or <pkg>|play|" "" \
       "$(printf '%s\n' "$APPS" | grep -v '^$' | grep -vE '^[a-z0-9_.]+\|(https://[^|]+\|[0-9a-f]{64}|play\|)$' || true)"
     t "$p: settings.conf lines are <ns> <key> <value>" "" \

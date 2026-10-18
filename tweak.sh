@@ -26,7 +26,7 @@ profiles() { for d in "$HERE"/devices/*/; do basename "$d"; done | tr '\n' ' '; 
 # Everything that ends up on the TV's command line goes through one of these first: `adb shell`
 # joins its arguments with spaces and the TV's shell parses the result, so an unchecked value is
 # a command.
-is_tok() { case $1 in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac; }
+is_tok() { case $1 in ''|*[!A-Za-z0-9_.:-]*) return 1 ;; esac; }
 is_pkg() { case $1 in ''|*[!A-Za-z0-9_.]*|[!A-Za-z]*|*.|*..*|*.[!A-Za-z]*) return 1 ;; esac; }
 is_profile() { case $1 in ''|-*|*[!a-z0-9-]*) return 1 ;; esac; }
 # Private DNS takes a hostname only: an IP address, like any name that does not resolve, leaves the
@@ -41,7 +41,78 @@ valid_minutes() { case $1 in ''|0*|*[!0-9]*|??????*) return 1 ;; esac; [ "$1" -l
 # stdin is closed: `adb shell` otherwise consumes the caller's stdin, which silently
 # swallows the rest of the input in `while read ... done < file` loops.
 sh_() { "$ADB" -s "$DEVICE" shell "$@" </dev/null; }
-kept() { printf '%s\n' "$KEEP" | grep -qx "$1"; }
+kept() { printf '%s\n' "$PROTECTED" | grep -qxF -- "$1"; }
+
+# Every profile file goes through this one filter, so CRLF endings, stray spaces and a comment after
+# an entry mean the same everywhere; keep.conf used to read "pkg # note" as a different package and
+# leave pkg unprotected. A comment is a # at the start of a line or after whitespace, so a URL
+# fragment survives.
+conf_lines() {
+    tr -d '\r' < "$1" | sed 's/^#.*//; s/[[:space:]]#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+        | grep -v '^$' || true
+}
+
+# device.conf is data, not code: only key="value" lines with known keys and plain characters.
+read_device_conf() {
+    model=; device=; tiers=; launcher=; media_apps=; props=
+    while IFS= read -r line; do
+        case $line in
+            '') continue ;;
+            [a-z]*=\"*\") key=${line%%=*}; val=${line#*=\"}; val=${val%\"} ;;
+            *) die "$1: expected key=\"value\", got: $line" ;;
+        esac
+        case $val in *[!A-Za-z0-9_.=:/,+' '-]*) die "$1: unexpected character in $key" ;; esac
+        case $key in
+            model) model=$val ;;
+            device) device=$val ;;
+            tiers) tiers=$val ;;
+            launcher) launcher=$val ;;
+            media_apps) media_apps=$val ;;
+            props) props=$val ;;
+            *) die "$1: unknown key '$key'" ;;
+        esac
+    done <<EOF
+$(conf_lines "$1")
+EOF
+    if [ -z "$model" ] || [ -z "$device" ] || [ -z "$tiers" ] || [ -z "$launcher" ]; then
+        die "$1 must set model, device, tiers and launcher"
+    fi
+    for x in $tiers; do is_tok "$x" || die "$1: bad tier name '$x'"; done
+    for x in $launcher $media_apps; do is_pkg "$x" || die "$1: '$x' is not a package name"; done
+    for x in $props; do
+        if ! is_tok "${x%%=*}" || ! is_tok "${x#*=}"; then die "$1: props wants key=value pairs, got '$x'"; fi
+    done
+}
+
+# Prints each malformed line of a profile file; a profile with one stops the run.
+bad_lines() {
+    case $2 in
+        packages) conf_lines "$1" | while read -r tier pkg rest; do
+                      { is_tok "$tier" && is_pkg "${pkg:-}" && [ -z "${rest:-}" ]; } || echo "  $tier ${pkg:-} ${rest:-}"
+                  done ;;
+        keep)     conf_lines "$1" | while read -r pkg rest; do
+                      { is_pkg "$pkg" && [ -z "${rest:-}" ]; } || echo "  $pkg ${rest:-}"
+                  done ;;
+        settings) conf_lines "$1" | while read -r ns key value rest; do
+                      case $ns in global|secure|system) ;; *) echo "  $ns $key"; continue ;; esac
+                      { is_tok "${key:-}" && is_tok "${value:-}" && [ -z "${rest:-}" ]; } || echo "  $ns ${key:-} ${value:-} ${rest:-}"
+                  done ;;
+        apps)     conf_lines "$1" | while IFS='|' read -r pkg url sum rest; do
+                      if ! is_pkg "$pkg" || [ -n "${rest:-}" ]; then echo "  $pkg"; continue; fi
+                      case $url in
+                          play) [ -z "$sum" ] || echo "  $pkg: a play entry takes no checksum" ;;
+                          https://*) case $sum in *[!0-9a-f]*|'') echo "  $pkg: checksum is not hex" ;; esac
+                                     [ ${#sum} -eq 64 ] || echo "  $pkg: checksum is not a sha256" ;;
+                          *) echo "  $pkg: url must be https:// or play" ;;
+                      esac
+                  done ;;
+    esac
+}
+check_file() {
+    bad=$(bad_lines "$1" "$2")
+    [ -z "$bad" ] || die "$1 has malformed lines:
+$bad"
+}
 
 # `--device <name>` or PROFILE= picks devices/<name>. Otherwise ro.product.model is matched
 # against every device.conf, which needs a connected device first.
@@ -49,7 +120,7 @@ load_profile() {
     if [ -z "$PROFILE" ]; then
         m=$(sh_ getprop ro.product.model | tr -d '\r')
         for d in "$HERE"/devices/*/; do
-            if grep -qxF "model=\"$m\"" "$d/device.conf" 2>/dev/null; then
+            if [ -f "$d/device.conf" ] && conf_lines "$d/device.conf" | grep -qxF "model=\"$m\""; then
                 PROFILE=$(basename "$d"); break
             fi
         done
@@ -59,16 +130,29 @@ load_profile() {
     PROFILE_DIR="$HERE/devices/$PROFILE"
     [ -f "$PROFILE_DIR/device.conf" ] \
         || die "unknown profile '$PROFILE'; available: $(profiles)"
-    model=; device=; tiers=; launcher=; media_apps=; props=
-    # shellcheck source=/dev/null
-    . "$PROFILE_DIR/device.conf"
+    read_device_conf "$PROFILE_DIR/device.conf"
     CONF=${CONF:-$PROFILE_DIR/packages.conf}
+    [ -f "$CONF" ] || die "$CONF is missing"
+    check_file "$CONF" packages
     # Protected packages are enforced independently of packages.conf so a bad edit cannot brick
-    # playback.
-    KEEP=$(grep -v '^#' "$PROFILE_DIR/keep.conf" || true)
-    APPS=$(grep -v '^#' "$PROFILE_DIR/apps.conf" || true)
-    SETTINGS=$(sed 's/#.*//' "$PROFILE_DIR/settings.conf")
+    # playback — which only holds if keep.conf fails closed.
+    [ -s "$PROFILE_DIR/keep.conf" ] \
+        || die "$PROFILE_DIR/keep.conf is missing or empty; it keeps playback working, so nothing runs without it"
+    check_file "$PROFILE_DIR/keep.conf" keep
+    KEEP=$(conf_lines "$PROFILE_DIR/keep.conf")
+    [ -n "$KEEP" ] || die "$PROFILE_DIR/keep.conf lists no packages"
+    APPS=; SETTINGS=
+    if [ -f "$PROFILE_DIR/apps.conf" ]; then
+        check_file "$PROFILE_DIR/apps.conf" apps; APPS=$(conf_lines "$PROFILE_DIR/apps.conf")
+    fi
+    if [ -f "$PROFILE_DIR/settings.conf" ]; then
+        check_file "$PROFILE_DIR/settings.conf" settings; SETTINGS=$(conf_lines "$PROFILE_DIR/settings.conf")
+    fi
     MEDIA_APPS=${MEDIA_APPS:-$media_apps}
+    for x in $MEDIA_APPS; do is_pkg "$x" || die "MEDIA_APPS: '$x' is not a package name"; done
+    # Streaming apps are protected too, whether or not keep.conf repeats them.
+    # shellcheck disable=SC2086  # media_apps is a space-separated list of package names
+    PROTECTED=$({ printf '%s\n' "$KEEP"; printf '%s\n' $MEDIA_APPS; } | sort -u)
     BACKUP_DIR=${BACKUP_DIR:-$BACKUP_ROOT/$PROFILE}
     SETTINGS_FILE=${SETTINGS_FILE:-$BACKUP_DIR/settings.txt}
 }
@@ -118,7 +202,7 @@ start_pkg() {
 # Emits packages for the given tiers, minus anything on KEEP.
 tier_pkgs() {
     for t in "$@"; do
-        awk -v t="$t" '$1==t && $2 ~ /^[a-z]/ {print $2}' "$CONF"
+        conf_lines "$CONF" | awk -v t="$t" '$1 == t {print $2}'
     done | sort -u | while read -r p; do
         if kept "$p"; then
             echo "skip (protected): $p" >&2
@@ -201,8 +285,8 @@ cmd_backup() {
 # A tier name that matches nothing would otherwise "disable 0, fail 0" and look like success.
 check_tiers() {
     for t in "$@"; do
-        awk -v t="$t" '$1 == t {found = 1} END {exit !found}' "$CONF" || {
-            others=$(awk '$1 !~ /^#/ && NF >= 2 {print $1}' "$CONF" | uniq \
+        conf_lines "$CONF" | awk -v t="$t" '$1 == t {found = 1} END {exit !found}' || {
+            others=$(conf_lines "$CONF" | awk '{print $1}' | uniq \
                 | while read -r x; do case " $tiers " in *" $x "*) ;; *) printf '%s ' "$x" ;; esac; done)
             die "unknown tier '$t'. $PROFILE tiers: $tiers (default); ${others% } (opt-in)"
         }
@@ -309,7 +393,7 @@ cmd_verify() {
     echo "--- protected packages enabled ---"
     disabled=$(sh_ 'pm list packages -d' | sed 's/^package://' | tr -d '\r')
     bad=0
-    for p in $KEEP $MEDIA_APPS; do
+    for p in $PROTECTED; do
         if printf '%s\n' "$disabled" | grep -qx "$p"; then
             echo "  FAIL $p is disabled"; bad=$((bad + 1)); rc=1
         fi

@@ -174,8 +174,10 @@ PROPS
 run() {
     s=$1; shift
     FAKE_TV=$T/tv-$s FAKE_DEV=$T/dev ADB=$T/bin/adb DEVICE=127.0.0.1:5555 \
-        BACKUP_ROOT=$T/state-$s sh "$ROOT/tweak.sh" "$@"
+        BACKUP_ROOT=$T/state-$s sh "${TWEAK_SH:-$ROOT/tweak.sh}" "$@"
 }
+# copy <name>: a scratch checkout to edit profiles in; use it with TWEAK_SH=$T/<name>/tweak.sh.
+copy() { rm -rf "${T:?}/$1"; mkdir "$T/$1"; cp "$ROOT/tweak.sh" "$T/$1/"; cp -R "$ROOT/devices" "$T/$1/"; }
 rc() { if run "$@" >/dev/null 2>&1; then echo 0; else echo $?; fi; }
 disabled() { sort "$T/tv-$1/disabled" | tr '\n' ' ' | sed 's/ $//'; }
 setting() { f=$T/tv-$1/settings/$2/$3; if [ -f "$f" ]; then cat "$f"; else echo null; fi; }
@@ -233,6 +235,18 @@ t "launch refuses shell syntax" 2 "$(rc args launch 'x;reboot')"
 t "sleep refuses 0" 2 "$(rc args sleep 0)"
 t "sleep refuses more than fits in 32-bit milliseconds" 2 "$(rc args sleep 35792)"
 t "sleep takes minutes" "0 1800000" "$(rc args sleep 30) $(setting args system screen_off_timeout)"
+
+# keep.conf protects whatever the spelling, and a profile that cannot be read safely stops the run.
+copy kc; P=$T/kc/devices/firetv-stick-hd
+printf 'ads\tcom.amazon.firebat\t# a bad edit\n' >> "$P/packages.conf"
+sed 's/^com\.amazon\.firebat$/com.amazon.firebat   # Prime Video/' "$P/keep.conf" > "$P/keep.new"; mv "$P/keep.new" "$P/keep.conf"
+tv kc; TWEAK_SH=$T/kc/tweak.sh run kc debloat ads >/dev/null 2>&1 || true
+t "a listed keep.conf entry stays enabled whatever packages.conf says" "enabled" \
+  "$(grep -qx com.amazon.firebat "$T/tv-kc/disabled" && echo disabled || echo enabled)"
+copy semi; printf 'ads\tcom.amazon.firebat;\n' >> "$T/semi/devices/firetv-stick-hd/packages.conf"
+tv semi; before=$(disabled semi)
+t "a ';' after a package name stops debloat" 1 "$(TWEAK_SH=$T/semi/tweak.sh rc semi debloat ads)"
+t "... before anything is disabled" "$before" "$(disabled semi)"
 
 [ "$fail" -eq 0 ] && echo "all passed" || echo "FAILURES"
 exit "$fail"

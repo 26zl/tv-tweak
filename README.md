@@ -102,7 +102,11 @@ package.
 ## Safety
 
 `keep.conf` is enforced independently of `packages.conf`, so editing the package list cannot
-break playback. `verify` checks the DRM props named in `device.conf`, that nothing kept is
+break playback. The streaming apps named in `media_apps` are protected the same way. It fails
+closed: without a `keep.conf` that lists packages, or with a profile line it cannot read safely (a
+package name with shell syntax in it, a plain-http download, a missing checksum), nothing runs.
+Every profile file is read the same way, so CRLF endings, stray spaces and `# comments` after an
+entry are harmless; `device.conf` is read as data and never executed. `verify` checks the DRM props named in `device.conf`, that nothing kept is
 disabled, that disabled packages stayed disabled, that settings held, that sideloads are present,
 and that the home screen resolves to an accepted launcher. `--deep` also launches each installed
 streaming app; it takes over the TV.
