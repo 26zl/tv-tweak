@@ -16,10 +16,18 @@ if [ "$ADB" = adb ] && ! command -v adb >/dev/null 2>&1; then
         if [ -x "$c" ]; then ADB=$c; break; fi
     done
 fi
-PROFILE=${PROFILE:-}
-BACKUP_ROOT=${BACKUP_ROOT:-$HERE/backups}
+PROFILE=${TWEAK_PROFILE:-}
+CONF=${TWEAK_CONF:-}
+MEDIA_APPS=${TWEAK_MEDIA_APPS:-}
+# The undo record lives outside the clone, one directory per TV: in backups/ inside the clone a
+# re-clone or `git clean -fdx` took it away, and two TVs of one model shared and overwrote it.
+if [ -n "${TWEAK_STATE:-}" ]; then STATE_ROOT=$TWEAK_STATE
+elif [ "$(uname -s)" = Darwin ]; then STATE_ROOT="$HOME/Library/Application Support/tv-tweak"
+else STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/tv-tweak"
+fi
+STATE=; LOGGING=; NEW_DEVICE=
 
-die() { echo "error: $*" >&2; exit 1; }
+die() { echo "error: $*" >&2; if [ -n "$LOGGING" ]; then log "error: $*"; fi; exit 1; }
 usage_error() { echo "error: $*" >&2; echo "see: $0 --help" >&2; exit 2; }
 profiles() { for d in "$HERE"/devices/*/; do basename "$d"; done | tr '\n' ' '; }
 
@@ -202,8 +210,6 @@ load_profile() {
     # Streaming apps are protected too, whether or not keep.conf repeats them.
     # shellcheck disable=SC2086  # media_apps is a space-separated list of package names
     PROTECTED=$({ printf '%s\n' "$KEEP"; printf '%s\n' $MEDIA_APPS; } | sort -u)
-    BACKUP_DIR=${BACKUP_DIR:-$BACKUP_ROOT/$PROFILE}
-    SETTINGS_FILE=${SETTINGS_FILE:-$BACKUP_DIR/settings.txt}
 }
 
 # Every setting this tool writes is recorded first, with the value it replaces, so `verify` can prove
@@ -223,7 +229,7 @@ put_setting() {
                                       END {exit !f}' "$SETTINGS_FILE" 2>/dev/null); then
         old=$prev
     fi
-    mkdir -p "$BACKUP_DIR"
+    mkdir -p "$STATE"
     { awk -v n="$1" -v k="$2" '!($1 == n && $2 == k)' "$SETTINGS_FILE" 2>/dev/null || true
       echo "$1 $2 $3 $old"; } > "$SETTINGS_FILE.tmp"
     mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
@@ -309,14 +315,64 @@ connect() {
     done
 }
 
-# DEVICE is an IP, which DHCP can reassign. `backup` pins the serial of the device a profile was
-# first used on; refuse to run `pm` against anything else.
-check_serial() {
-    want=${EXPECT_SERIAL:-$(cat "$BACKUP_DIR/serial.txt" 2>/dev/null || true)}
-    [ -n "$want" ] || return 0
-    got=$(dev getprop ro.serialno) || die "could not read the serial number from $DEVICE"
-    [ "$got" = "$want" ] \
-        || die "$DEVICE reports serial '$got', expected '$want' (profile $PROFILE)"
+# The TV's state directory is keyed by its serial number, so each TV keeps its own record.
+load_state() {
+    SERIAL=$(dev getprop ro.serialno) || die "could not read the serial number from $DEVICE"
+    case $SERIAL in
+        ''|*[!A-Za-z0-9_.-]*) die "$DEVICE reports a serial number this tool cannot use as a name: '$SERIAL'" ;;
+    esac
+    BUILD=$(dev getprop ro.build.fingerprint) || die "could not read the firmware build from $DEVICE"
+    STATE="$STATE_ROOT/$PROFILE/$SERIAL"
+    BASELINE="$STATE/baseline.txt"; APPLIED="$STATE/applied.txt"; SETTINGS_FILE="$STATE/settings.txt"
+    migrate_legacy
+}
+
+# Before 0.1.0 the state lived in backups/<profile>/ inside the clone, with the serial in serial.txt.
+# Move it the first time its TV is seen, so nothing recorded is lost; the oldest snapshot becomes
+# the baseline.
+migrate_legacy() {
+    old="$HERE/backups/$PROFILE"
+    [ -d "$old" ] || return 0
+    case $(cat "$old/serial.txt" 2>/dev/null || true) in
+        "$SERIAL") ;;
+        '') echo "note: $old has no serial.txt; if it belongs to this TV, move its files to $STATE" >&2; return 0 ;;
+        *) return 0 ;;
+    esac
+    if [ -e "$STATE" ]; then echo "note: left $old alone: $STATE already exists" >&2; return 0; fi
+    mkdir -p "$STATE"
+    for f in "$old"/* "$old"/.[!.]*; do
+        if [ ! -e "$f" ] && [ ! -L "$f" ]; then continue; fi
+        case ${f##*/} in
+            latest.txt|serial.txt) rm -f "$f" ;;
+            state-*) mv "$f" "$STATE/snapshot-${f##*/state-}" ;;
+            *) mv "$f" "$STATE/" ;;
+        esac
+    done
+    for f in "$STATE"/snapshot-*; do
+        if [ -e "$f" ]; then cp "$f" "$BASELINE"; fi
+        break
+    done
+    rmdir "$old" "$HERE/backups" 2>/dev/null || true
+    echo "moved this TV's state from $old to $STATE" >&2
+}
+
+# DEVICE is an IP, which DHCP can reassign. A TV this profile has not been used on is refused unless
+# --new-device says it is meant, so the next TV to get that address is not changed by mistake.
+check_known() {
+    if [ -d "$STATE" ] || [ -n "$NEW_DEVICE" ]; then return 0; fi
+    known=
+    for d in "$STATE_ROOT/$PROFILE"/*/; do
+        if [ -d "$d" ]; then known="$known $(basename "$d")"; fi
+    done
+    [ -z "$known" ] || die "this TV (serial $SERIAL) is new to profile $PROFILE, which has been used on:$known. If DEVICE points at the wrong TV, fix that; for a second TV of this model, add --new-device"
+}
+
+# One line per run that changes something, in the TV's state directory.
+log() { if [ -d "$STATE" ]; then printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE/log.txt"; fi; }
+on_exit() {
+    rc=$?
+    if [ -n "${tmp:-}" ]; then rm -rf "$tmp"; fi
+    if [ -n "$LOGGING" ]; then log "$cmd: exit $rc"; fi
 }
 
 cmd_info() {
@@ -334,17 +390,15 @@ cmd_info() {
 
 cmd_backup() {
     list=$(pkg_list -d) || exit 1
-    mkdir -p "$BACKUP_DIR"
+    mkdir -p "$STATE"
     # The host's clock in UTC: the TV's may be wrong until it syncs, and its output is not trusted
     # for file names.
-    f="$BACKUP_DIR/state-$(date -u +%Y%m%d-%H%M%S).txt"
-    { echo "# disabled at backup time"; printf '%s\n' "$list" | sed '/^$/d' | sort; } > "$f"
-    ln -sf "$(basename "$f")" "$BACKUP_DIR/latest.txt"
-    if [ ! -s "$BACKUP_DIR/serial.txt" ]; then
-        serial=$(dev getprop ro.serialno) || die "could not read the serial number from $DEVICE"
-        [ -n "$serial" ] || die "$DEVICE reports no serial number, so it cannot be told apart from another TV"
-        echo "$serial" > "$BACKUP_DIR/serial.txt"
-    fi
+    f="$STATE/snapshot-$(date -u +%Y%m%d-%H%M%S).txt"
+    { echo "# disabled on $BUILD"; printf '%s\n' "$list" | sed '/^$/d' | sort; } > "$f"
+    # The first snapshot is the baseline and stays: one taken after debloat would list this tool's
+    # own changes as the owner's, and restore would then leave them alone.
+    if [ ! -f "$BASELINE" ]; then cp "$f" "$BASELINE"; echo "baseline: $BASELINE"; fi
+    if [ ! -f "$STATE/build.txt" ]; then echo "$BUILD" > "$STATE/build.txt"; fi
     echo "backup: $f ($(grep -vc '^#' "$f") already-disabled packages)"
 }
 
@@ -363,10 +417,8 @@ cmd_debloat() {
     # shellcheck disable=SC2086  # deliberate word splitting into separate tier arguments
     if [ $# -eq 0 ]; then set -- $tiers; fi
     check_tiers "$@"
-    [ -f "$BACKUP_DIR/latest.txt" ] || cmd_backup
-    prior="$BACKUP_DIR/$(readlink "$BACKUP_DIR/latest.txt")"
-    applied="$BACKUP_DIR/applied.txt"
-    touch "$applied"
+    [ -f "$BASELINE" ] || cmd_backup
+    touch "$APPLIED"
     off=$(pkg_list -d) || exit 1
     echo "tiers: $*"
     ok=0; already=0; fail=0
@@ -380,15 +432,15 @@ cmd_debloat() {
             # Record what this tool actually turned off. Restoring from this list rather than
             # from packages.conf keeps working after the config is edited, and never re-enables
             # something the user had already disabled themselves.
-            if ! grep -qxF -- "$p" "$prior" && ! grep -qxF -- "$p" "$applied"; then
-                echo "$p" >> "$applied"
+            if ! grep -qxF -- "$p" "$BASELINE" && ! grep -qxF -- "$p" "$APPLIED"; then
+                echo "$p" >> "$APPLIED"
             fi
         else
             rc=$?; fail=$((fail + 1)); echo "  FAILED   $p: $(reason "$out" "$rc")" >&2
             alive || die "lost the connection to $DEVICE; the $ok disabled so far are recorded — run debloat again when the TV is back"
         fi
     done
-    echo "disabled $ok, already off $already, failed $fail (restore list: $applied)"
+    echo "disabled $ok, already off $already, failed $fail (restore list: $APPLIED)"
     [ "$fail" -eq 0 ]
 }
 
@@ -405,9 +457,9 @@ restore_cmd() {
 }
 
 cmd_restore() {
-    applied="$BACKUP_DIR/applied.txt"
+    applied=$APPLIED
     [ -s "$applied" ] || [ -s "$SETTINGS_FILE" ] \
-        || die "nothing to restore: no packages or settings recorded in $BACKUP_DIR"
+        || die "nothing to restore: no packages or settings recorded in $STATE"
     gone=; left=0
     # Each list is rewritten with only what could not be undone, so a re-run picks up where this one
     # stopped and verify can still see it; a list goes only once it is empty.
@@ -475,8 +527,8 @@ EOF
 cmd_perf() { cmd_tune "$@"; }
 
 cmd_apps() {
+    # Removed by on_exit; an interrupt ends the run through the same path, so the download goes too.
     tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
     fail=0
     # Fed by redirect, not a pipe: a checksum mismatch must abort the script, not a subshell.
     while IFS='|' read -r name url want; do
@@ -530,7 +582,7 @@ cmd_verify() {
     # Drift check: some firmware re-enables packages on boot, so "nothing is broken" is not
     # the same question as "everything we turned off is still off".
     echo "--- packages this tool disabled are still disabled ---"
-    applied="$BACKUP_DIR/applied.txt"
+    applied=$APPLIED
     if [ -s "$applied" ]; then
         back=
         while read -r p; do
@@ -700,13 +752,19 @@ usage: $(basename "$0") [options] <command> [arguments]
 options, anywhere on the line:
   --device <profile>    use devices/<profile> instead of matching the TV's model
   --deep                verify: also launch each installed media app (takes over the TV)
+  --new-device          start a separate record for a second TV of the same model
   -h, --help            this text; never touches the TV
   --version             print the version
 
 profiles: $(profiles)
-env: DEVICE (auto-detected when exactly one is attached or advertised over mDNS), ADB, PROFILE,
-     CONF, BACKUP_DIR, SETTINGS_FILE
-     EXPECT_SERIAL  override the serial that backup pins in backups/<profile>/serial.txt
+state: $STATE_ROOT/<profile>/<serial>/
+env: DEVICE           ip:port or serial (auto-detected when exactly one is attached or on mDNS)
+     ADB              path to adb
+     TWEAK_PROFILE    same as --device
+     TWEAK_STATE      where the per-TV state lives (default above)
+     TWEAK_CONF       another packages.conf
+     TWEAK_MEDIA_APPS replace the profile's media_apps
+     TWEAK_TIMEOUT    seconds before an adb call is given up (default 60)
 EOF
 }
 
@@ -723,6 +781,7 @@ while [ $# -gt 0 ]; do
         --device)  [ $# -ge 2 ] || usage_error "--device needs a profile name"; PROFILE=$2; shift ;;
         --device=*) PROFILE=${1#--device=} ;;
         --deep)    DEEP=1 ;;
+        --new-device) NEW_DEVICE=1 ;;
         -*)        usage_error "unknown option '$1'" ;;
         *)  if [ -z "$cmd" ]; then cmd=$1
             elif is_tok "$1"; then args="$args $1"
@@ -762,4 +821,14 @@ case $cmd in
         esac ;;
     *) usage_error "unknown command '$cmd'" ;;
 esac
-connect; load_profile; check_serial; "cmd_$cmd" "$@"
+connect; load_profile; load_state
+trap on_exit EXIT
+trap 'exit 130' INT TERM HUP
+case $cmd in
+    info|verify|status|launch) ;;
+    *)  check_known
+        mkdir -p "$STATE"; LOGGING=1
+        log "$cmd$args — tweak $VERSION, $BUILD"
+        echo "state: $STATE" ;;
+esac
+"cmd_$cmd" "$@"

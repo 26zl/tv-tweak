@@ -40,7 +40,7 @@ export DEVICE=192.168.1.50:5555        # only if several devices are attached
 ./tweak.sh [options] <command> [arguments]
 
   info                  device summary
-  backup                snapshot which packages are already disabled; pins the device serial
+  backup                snapshot which packages are already disabled (the first one is kept as the baseline)
   debloat [tiers...]    disable packages (default tiers come from the profile)
   restore               re-enable the packages this tool disabled and roll its settings back
   tune                  apply the profile's settings.conf, trim caches
@@ -70,17 +70,18 @@ First run — `verify` first, so you can tell a regression from a pre-existing f
 ./tweak.sh verify
 ```
 
-`debloat` appends everything it disables to `backups/<profile>/applied.txt` and every setting
-written goes to `backups/<profile>/settings.txt` with its original value, recorded before the
-write. `restore` reverses exactly those, so it stays correct after you edit `packages.conf` and
+`debloat` appends everything it disables to `applied.txt` in the TV's state directory (see
+[Layout](#layout)), and every setting written goes to `settings.txt` with its original value,
+recorded before the write. `restore` reverses exactly those, so it stays correct after you edit `packages.conf` and
 never touches what you had already disabled yourself. Packages and settings are restored
 independently; whatever fails stays recorded and `restore` exits 1, so running it again finishes
 the job. A TV that stops answering ends the run instead of turning every remaining step into a
 failure, and each adb call gives up after `TWEAK_TIMEOUT` seconds (60 by default). A read that
 fails is an error, never an empty answer.
 
-`backup` also records `ro.serialno`; every later run refuses to touch a device with a different
-serial, which guards against DHCP handing the IP to something else. `EXPECT_SERIAL=` overrides it.
+State is kept per TV, keyed by its serial number (`ro.serialno`). A TV the profile has not been
+used on before is refused, which guards against DHCP handing the IP to another TV; for a second TV
+of the same model, add `--new-device` once and it gets its own record.
 
 Run `verify` after reboots and after installing anything: some firmware re-enables packages on
 its own, and `verify` reports exactly which ones drifted.
@@ -127,13 +128,27 @@ by hand on each verified device after the full debloat and `tune`.
 ```text
 tweak.sh         the tool
 test.sh          self-test for the parsing logic and every profile; no device required
+test-flows.sh    every command end to end against a simulated TV; no device required
 devices/         one directory per device, see Profiles
-backups/<profile>/
-  state-*.txt    what was already disabled before the tool ran
-  applied.txt    what the tool disabled; the exact input to `restore`
-  settings.txt   every setting written, as `<namespace> <key> <applied> <original>`
-  serial.txt     the device this profile was first used on
 ```
+
+The undo record lives outside the clone, one directory per TV, so a re-clone or `git clean -fdx`
+cannot take it away: `~/.local/state/tv-tweak/<profile>/<serial>/` (or under `$XDG_STATE_HOME`),
+`~/Library/Application Support/tv-tweak/<profile>/<serial>/` on macOS, or `$TWEAK_STATE` if set.
+Every command that changes something prints the path.
+
+```text
+<profile>/<serial>/
+  baseline.txt     what was already disabled before the tool first ran; never rewritten
+  snapshot-*.txt   every later `backup`
+  applied.txt      what the tool disabled; the exact input to `restore`
+  settings.txt     every setting written, as `<namespace> <key> <applied> <original>`
+  build.txt        the firmware build the TV had at the first backup
+  log.txt          one line per run that changed something, in UTC
+```
+
+Keep it until you have run `restore`: it is the only record of what to undo. State from earlier
+versions, in `backups/<profile>/` inside the clone, moves there the first time its TV is connected.
 
 ## License
 

@@ -176,14 +176,14 @@ PROPS
 run() {
     s=$1; shift
     FAKE_TV=$T/tv-$s FAKE_DEV=$T/dev ADB=$T/bin/adb DEVICE=127.0.0.1:5555 \
-        BACKUP_ROOT=$T/state-$s sh "${TWEAK_SH:-$ROOT/tweak.sh}" "$@"
+        TWEAK_STATE=$T/state-$s sh "${TWEAK_SH:-$ROOT/tweak.sh}" "$@"
 }
 # copy <name>: a scratch checkout to edit profiles in; use it with TWEAK_SH=$T/<name>/tweak.sh.
 copy() { rm -rf "${T:?}/$1"; mkdir "$T/$1"; cp "$ROOT/tweak.sh" "$T/$1/"; cp -R "$ROOT/devices" "$T/$1/"; }
 rc() { if run "$@" >/dev/null 2>&1; then echo 0; else echo $?; fi; }
 disabled() { sort "$T/tv-$1/disabled" | tr '\n' ' ' | sed 's/ $//'; }
 setting() { f=$T/tv-$1/settings/$2/$3; if [ -f "$f" ]; then cat "$f"; else echo null; fi; }
-state() { echo "$T/state-$1/firetv-stick-hd"; }
+state() { echo "$T/state-$1/firetv-stick-hd/FAKESERIAL${2:-0001}"; }
 
 # --- flows -----------------------------------------------------------------------------------------
 tv rt; before=$(disabled rt)
@@ -270,7 +270,7 @@ t "restore works after a debloat that found everything already off" "0 3" \
 # A read that fails is an error, never an empty answer.
 tv rd; echo com.amazon.firebat >> "$T/tv-rd/disabled"; touch "$T/tv-rd/fail_list_disabled"
 t "verify fails when the disabled list cannot be read" 1 "$(rc rd verify)"
-t "backup refuses to record an unreadable list" "1 none" "$(rc rd backup) $(ls "$(state rd)"/state-* 2>/dev/null || echo none)"
+t "backup refuses to record an unreadable list" "1 none" "$(rc rd backup) $(ls "$(state rd)"/snapshot-* 2>/dev/null || echo none)"
 
 # Failures carry their reason and the exit code.
 tv bl
@@ -299,6 +299,57 @@ if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || 
     t "a command that never answers times out" "1 no answer within 2s" \
       "$(TWEAK_TIMEOUT=2 rc hang debloat ads) $(TWEAK_TIMEOUT=2 run hang debloat ads 2>&1 >/dev/null | sed -n 's/.*acr: //p')"
 fi
+
+# The undo record lives outside the clone, one per TV.
+copy home; mkdir -p "$T/home"; tv home
+case $(uname -s) in
+    Darwin) where="$T/home/Library/Application Support/tv-tweak" ;;
+    *) where="$T/home/.local/state/tv-tweak" ;;
+esac
+FAKE_TV=$T/tv-home FAKE_DEV=$T/dev ADB=$T/bin/adb DEVICE=127.0.0.1:5555 HOME=$T/home XDG_STATE_HOME='' \
+    sh "$T/home/tweak.sh" debloat >/dev/null 2>&1
+t "state lives outside the clone by default" "yes no" \
+  "$([ -s "$where/firetv-stick-hd/FAKESERIAL0001/applied.txt" ] && echo yes || echo no) $([ -e "$T/home/backups" ] && echo yes || echo no)"
+
+tv base; run base backup >/dev/null; b=$(cat "$(state base)/baseline.txt")
+run base debloat >/dev/null 2>&1; run base backup >/dev/null
+t "the baseline survives a backup taken after debloat" "$b" "$(cat "$(state base)/baseline.txt")"
+t "every run that changes something is logged" "yes" \
+  "$(grep -q 'debloat: exit 0' "$(state base)/log.txt" && grep -q 'backup — tweak' "$(state base)/log.txt" && echo yes || echo no)"
+
+# State written by an older version, in backups/<profile>/ inside the clone, moves to its TV's place.
+copy legacy; L=$T/legacy/backups/firetv-stick-hd; mkdir -p "$L"
+echo FAKESERIAL0001 > "$L/serial.txt"
+printf '# disabled at backup time\ncom.amazon.dummy.music\ncom.example.userdisabled\n' > "$L/state-20260801-120000.txt"
+printf '# disabled at backup time\ncom.amazon.tv.acr\n' > "$L/state-20260901-120000.txt"
+ln -s state-20260901-120000.txt "$L/latest.txt"
+printf 'com.amazon.tv.acr\ncom.amazon.aca\n' > "$L/applied.txt"
+printf 'secure location_mode 0 3\nglobal window_animation_scale 0.0 1.0\n' > "$L/settings.txt"
+tv legacy; printf 'com.amazon.tv.acr\ncom.amazon.aca\n' >> "$T/tv-legacy/disabled"
+echo 0 > "$T/tv-legacy/settings/secure/location_mode"; echo 0.0 > "$T/tv-legacy/settings/global/window_animation_scale"
+TWEAK_SH=$T/legacy/tweak.sh run legacy verify >/dev/null 2>&1 || true
+t "older state moves out of the clone" "gone" "$([ -e "$T/legacy/backups" ] && echo still-there || echo gone)"
+t "... keeping the restore list and settings" "yes yes" \
+  "$([ -s "$(state legacy)/applied.txt" ] && echo yes) $([ -s "$(state legacy)/settings.txt" ] && echo yes)"
+t "... with the oldest snapshot as the baseline" "com.amazon.dummy.music com.example.userdisabled" \
+  "$(grep -v '^#' "$(state legacy)/baseline.txt" | tr '\n' ' ' | sed 's/ $//')"
+t "... and restore undoes it" "0 3 1.0" \
+  "$(TWEAK_SH=$T/legacy/tweak.sh rc legacy restore) $(setting legacy secure location_mode) $(setting legacy global window_animation_scale)"
+copy legacy2; mkdir -p "$T/legacy2/backups/firetv-stick-hd"; echo OTHERSERIAL > "$T/legacy2/backups/firetv-stick-hd/serial.txt"
+tv legacy2; TWEAK_SH=$T/legacy2/tweak.sh run legacy2 verify >/dev/null 2>&1 || true
+t "older state from another TV stays where it is" "yes" "$([ -e "$T/legacy2/backups/firetv-stick-hd/serial.txt" ] && echo yes)"
+
+# A second TV of the same model gets its own record, and only when asked.
+tv a; tv b; sed 's/FAKESERIAL0001/FAKESERIAL0002/' "$T/tv-b/props" > "$T/props.tmp" && mv "$T/props.tmp" "$T/tv-b/props"
+echo com.amazon.tahoe >> "$T/tv-b/disabled"; echo 1 > "$T/tv-b/settings/secure/location_mode"
+both() { s=$1; shift; FAKE_TV=$T/tv-$s FAKE_DEV=$T/dev ADB=$T/bin/adb DEVICE=127.0.0.1:5555 TWEAK_STATE=$T/state-ab sh "$ROOT/tweak.sh" "$@"; }
+both a debloat >/dev/null 2>&1; both a tune >/dev/null 2>&1
+t "a second TV of the same model is refused" 1 "$(if both b debloat >/dev/null 2>&1; then echo 0; else echo $?; fi)"
+both b debloat --new-device >/dev/null 2>&1; both b tune >/dev/null 2>&1; both b restore >/dev/null 2>&1
+t "... and with --new-device keeps its own record" "disabled 1" \
+  "$(grep -qx com.amazon.tahoe "$T/tv-b/disabled" && echo disabled || echo enabled) $(setting b secure location_mode)"
+t "... while the first TV can still be restored" "0 3" \
+  "$(if both a restore >/dev/null 2>&1; then echo 0; else echo $?; fi) $(setting a secure location_mode)"
 
 # keep.conf protects whatever the spelling, and a profile that cannot be read safely stops the run.
 copy kc; P=$T/kc/devices/firetv-stick-hd
