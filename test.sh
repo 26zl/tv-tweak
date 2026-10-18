@@ -82,7 +82,7 @@ protects() { (HERE=$lab; PROFILE=v; CONF=; load_profile; if kept "$1"; then echo
 
 variant; sed 's/^com\.amazon\.firebat$/com.amazon.firebat   # Prime Video/' "$keep" > "$keep.new"; mv "$keep.new" "$keep"
 t "keep.conf: a comment after an entry still protects it" "yes" "$(protects com.amazon.firebat)"
-variant; sed 's/$/\r/' "$keep" > "$keep.new"; mv "$keep.new" "$keep"
+variant; awk '{printf "%s\r\n", $0}' "$keep" > "$keep.new"; mv "$keep.new" "$keep"
 t "keep.conf: CRLF line endings still protect" "yes" "$(protects com.amazon.firebat)"
 variant; sed 's/^com\.amazon\.firebat$/  com.amazon.firebat  /' "$keep" > "$keep.new"; mv "$keep.new" "$keep"
 t "keep.conf: surrounding spaces still protect" "yes" "$(protects com.amazon.firebat)"
