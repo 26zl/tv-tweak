@@ -37,21 +37,31 @@ export DEVICE=192.168.1.50:5555        # only if several devices are attached
 ## Usage
 
 ```text
-./tweak.sh [--device <profile>] <command>
+./tweak.sh [options] <command> [arguments]
 
-  info                 device summary
-  backup               snapshot which packages are already disabled; pins the device serial
-  debloat [tiers...]   disable packages (default tiers come from the profile)
-  restore              undo everything: packages and settings
-  tune                 apply the profile's settings.conf, trim caches
-  apps                 sideload the profile's apps.conf (checksum-pinned)
-  verify [--deep]      DRM props, protected packages, drift, launcher; --deep launches media apps
-  status               list currently disabled packages
-  launch <package>     start an app with no home-screen icon
-  home [package]       show or set the launcher
-  dns [host|off|show]  system-wide DNS-over-TLS
-  sleep <min|never>    display-off and device-sleep timers
+  info                  device summary
+  backup                snapshot which packages are already disabled; pins the device serial
+  debloat [tiers...]    disable packages (default tiers come from the profile)
+  restore               re-enable the packages this tool disabled and roll its settings back
+  tune                  apply the profile's settings.conf, trim caches
+  apps                  sideload the profile's apps.conf (checksum-pinned)
+  verify                DRM props, protected packages, drift, launcher
+  status                list currently disabled packages
+  launch <package>      start an app with no home-screen icon
+  home [package|show]   show or set the launcher
+  dns [host|off|auto|show]    Private DNS: a DNS-over-TLS hostname, off, or Android's default
+  sleep [minutes|never|show]  display-off and device-sleep timers
+
+options, anywhere on the line:
+  --device <profile>    use devices/<profile> instead of matching the TV's model
+  --deep                verify: also launch each installed media app (takes over the TV)
+  -h, --help            usage; never touches the TV
+  --version             print the version
 ```
+
+Arguments are checked before anything connects: an unknown tier, a hostname that Private DNS
+cannot use (an IP address, a name without a dot), or anything with shell syntax in it is refused
+with exit code 2.
 
 First run — `verify` first, so you can tell a regression from a pre-existing fault:
 

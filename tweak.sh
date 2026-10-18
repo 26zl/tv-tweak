@@ -3,6 +3,7 @@
 # Everything device-specific lives in devices/<profile>/; the README lists the verified devices.
 set -eu
 
+VERSION=0.1.0
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 DEVICE=${DEVICE:-}
 ADB=${ADB:-adb}
@@ -19,7 +20,23 @@ PROFILE=${PROFILE:-}
 BACKUP_ROOT=${BACKUP_ROOT:-$HERE/backups}
 
 die() { echo "error: $*" >&2; exit 1; }
+usage_error() { echo "error: $*" >&2; echo "see: $0 --help" >&2; exit 2; }
 profiles() { for d in "$HERE"/devices/*/; do basename "$d"; done | tr '\n' ' '; }
+
+# Everything that ends up on the TV's command line goes through one of these first: `adb shell`
+# joins its arguments with spaces and the TV's shell parses the result, so an unchecked value is
+# a command.
+is_tok() { case $1 in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac; }
+is_pkg() { case $1 in ''|*[!A-Za-z0-9_.]*|[!A-Za-z]*|*.|*..*|*.[!A-Za-z]*) return 1 ;; esac; }
+is_profile() { case $1 in ''|-*|*[!a-z0-9-]*) return 1 ;; esac; }
+# Private DNS takes a hostname only: an IP address, like any name that does not resolve, leaves the
+# TV with no DNS at all.
+is_host() {
+    case $1 in ''|-*|.*|*.|*..*|*[!A-Za-z0-9.-]*) return 1 ;; *[!0-9.]*) ;; *) return 1 ;; esac
+    case $1 in *.*) return 0 ;; esac
+    return 1
+}
+valid_minutes() { case $1 in ''|0*|*[!0-9]*|??????*) return 1 ;; esac; [ "$1" -le 35791 ]; }
 
 # stdin is closed: `adb shell` otherwise consumes the caller's stdin, which silently
 # swallows the rest of the input in `while read ... done < file` loops.
@@ -38,6 +55,7 @@ load_profile() {
         done
         [ -n "$PROFILE" ] || die "no profile in devices/ matches model '$m' — pass --device <name>"
     fi
+    is_profile "$PROFILE" || die "invalid profile name '$PROFILE'"
     PROFILE_DIR="$HERE/devices/$PROFILE"
     [ -f "$PROFILE_DIR/device.conf" ] \
         || die "unknown profile '$PROFILE'; available: $(profiles)"
@@ -180,9 +198,21 @@ cmd_backup() {
     echo "backup: $f ($(grep -vc '^#' "$f") already-disabled packages)"
 }
 
+# A tier name that matches nothing would otherwise "disable 0, fail 0" and look like success.
+check_tiers() {
+    for t in "$@"; do
+        awk -v t="$t" '$1 == t {found = 1} END {exit !found}' "$CONF" || {
+            others=$(awk '$1 !~ /^#/ && NF >= 2 {print $1}' "$CONF" | uniq \
+                | while read -r x; do case " $tiers " in *" $x "*) ;; *) printf '%s ' "$x" ;; esac; done)
+            die "unknown tier '$t'. $PROFILE tiers: $tiers (default); ${others% } (opt-in)"
+        }
+    done
+}
+
 cmd_debloat() {
     # shellcheck disable=SC2086  # deliberate word splitting into separate tier arguments
     if [ $# -eq 0 ]; then set -- $tiers; fi
+    check_tiers "$@"
     [ -f "$BACKUP_DIR/latest.txt" ] || cmd_backup
     prior="$BACKUP_DIR/$(readlink "$BACKUP_DIR/latest.txt")"
     applied="$BACKUP_DIR/applied.txt"
@@ -353,7 +383,7 @@ EOF
         echo "  FAIL home is '${home:-none}', expected one of: $launcher"; rc=1
     fi
 
-    if [ "${1:-}" = "--deep" ]; then
+    if [ -n "$DEEP" ]; then
         echo "--- launching media apps (takes over the TV) ---"
         present=''
         for p in $MEDIA_APPS; do
@@ -382,9 +412,10 @@ cmd_sleep() {
             echo "  sleep_timeout      $(sh_ settings get secure sleep_timeout | tr -d '\r') ms"
             return 0
             ;;
-        never)       ms=2147483647 ;;
-        ''|*[!0-9]*) die "usage: sleep <minutes|never|show>" ;;
-        *)           ms=$(($1 * 60000)) ;;
+        never) ms=2147483647 ;;
+        # Android reads both timers as a 32-bit millisecond count; 0 has no documented meaning.
+        *)     valid_minutes "$1" || die "sleep takes 1 to 35791 minutes, never or show"
+               ms=$(($1 * 60000)) ;;
     esac
     put_setting system screen_off_timeout "$ms"
     put_setting secure sleep_timeout "$ms"
@@ -401,7 +432,12 @@ cmd_dns() {
         off)
             put_setting global private_dns_mode off
             ;;
+        # Android's own default: DNS-over-TLS whenever the network's resolver offers it.
+        auto)
+            put_setting global private_dns_mode opportunistic
+            ;;
         *)
+            is_host "$1" || die "Private DNS needs a hostname such as dns.example.com, not '$1'"
             put_setting global private_dns_specifier "$1"
             put_setting global private_dns_mode hostname
             ;;
@@ -413,6 +449,7 @@ cmd_home() {
     case "${1:-show}" in
         show) home_activity ;;
         *)
+            is_pkg "$1" || die "not a package name: '$1'"
             comp=$(sh_ 'cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0' \
                 | tr -d '\r' | awk -v p="$1/" 'index($1, p) == 1 {print $1; exit}')
             [ -n "$comp" ] || die "$1 is not installed or has no HOME activity"
@@ -424,27 +461,32 @@ cmd_home() {
 
 # F-Droid ships no LEANBACK_LAUNCHER icon, so it never appears on a TV home screen.
 cmd_launch() {
-    [ $# -eq 1 ] || die "usage: launch <package>"
     start_pkg "$1" || die "could not start $1"
     echo "started $1"
 }
 
 usage() {
     cat <<EOF
-usage: $(basename "$0") [--device <profile>] <command>
+usage: $(basename "$0") [options] <command> [arguments]
 
-  info                 device summary
-  backup               snapshot which packages are already disabled
-  debloat [tiers...]   disable packages (default tiers come from the profile)
-  restore              undo this tool: re-enable its packages and roll settings back
-  tune                 apply the profile's settings.conf, trim caches
-  apps                 sideload the profile's apps.conf (checksum-pinned)
-  verify [--deep]      DRM props, protected packages, drift, launcher; --deep also launches media apps
-  status               list currently disabled packages
-  launch <package>     start an app that has no home-screen icon (e.g. F-Droid)
-  home [package]       show or set the launcher
-  dns [host|off|show]  system-wide DNS-over-TLS
-  sleep <min|never>    display-off and device-sleep timers (both, or 'show')
+  info                  device summary
+  backup                snapshot which packages are already disabled
+  debloat [tiers...]    disable packages (default tiers come from the profile)
+  restore               undo this tool: re-enable its packages and roll settings back
+  tune                  apply the profile's settings.conf, trim caches ('perf' is an old name)
+  apps                  sideload the profile's apps.conf (checksum-pinned)
+  verify                DRM props, protected packages, drift, launcher
+  status                list currently disabled packages
+  launch <package>      start an app that has no home-screen icon (e.g. F-Droid)
+  home [package|show]   show or set the launcher
+  dns [host|off|auto|show]    Private DNS: a DNS-over-TLS hostname, off, or Android's default
+  sleep [minutes|never|show]  display-off and device-sleep timers, both at once
+
+options, anywhere on the line:
+  --device <profile>    use devices/<profile> instead of matching the TV's model
+  --deep                verify: also launch each installed media app (takes over the TV)
+  -h, --help            this text; never touches the TV
+  --version             print the version
 
 profiles: $(profiles)
 env: DEVICE (auto-detected when exactly one is attached or advertised over mDNS), ADB, PROFILE,
@@ -456,14 +498,53 @@ EOF
 # Sourcing with TWEAK_LIB=1 loads the functions without dispatching, for test.sh.
 if [ -n "${TWEAK_LIB:-}" ]; then return 0; fi
 
-if [ "${1:-}" = --device ]; then
-    [ $# -ge 2 ] || { usage; exit 2; }
-    PROFILE=$2; shift 2
-fi
-[ $# -ge 1 ] || { usage; exit 2; }
-c=$1; shift
-case "$c" in
-    info|backup|debloat|restore|tune|perf|apps|verify|status|launch|home|dns|sleep) connect; load_profile; check_serial; "cmd_$c" "$@" ;;
-    help|-h|--help) usage ;;
-    *) usage; exit 2 ;;
+# Options may sit anywhere, and asking for help never reaches the TV: `dns --help` used to set the
+# Private DNS hostname to "--help".
+cmd=; args=; DEEP=
+while [ $# -gt 0 ]; do
+    case $1 in
+        -h|--help) usage; exit 0 ;;
+        --version) echo "tweak $VERSION"; exit 0 ;;
+        --device)  [ $# -ge 2 ] || usage_error "--device needs a profile name"; PROFILE=$2; shift ;;
+        --device=*) PROFILE=${1#--device=} ;;
+        --deep)    DEEP=1 ;;
+        -*)        usage_error "unknown option '$1'" ;;
+        *)  if [ -z "$cmd" ]; then cmd=$1
+            elif is_tok "$1"; then args="$args $1"
+            else usage_error "invalid argument '$1'"
+            fi ;;
+    esac
+    shift
+done
+[ -n "$cmd" ] || { usage >&2; exit 2; }
+if [ -n "$PROFILE" ] && ! is_profile "$PROFILE"; then usage_error "invalid profile name '$PROFILE'"; fi
+if [ -n "$DEEP" ] && [ "$cmd" != verify ]; then usage_error "--deep only applies to verify"; fi
+# shellcheck disable=SC2086  # every argument passed is_tok: no spaces, no glob characters
+set -- $args
+# Arguments are checked here, before connecting, so a typo costs nothing on the TV.
+case $cmd in
+    help) usage; exit 0 ;;
+    info|backup|restore|tune|perf|apps|verify|status)
+        [ $# -eq 0 ] || usage_error "$cmd takes no arguments" ;;
+    debloat) ;;
+    launch)
+        if [ $# -ne 1 ] || ! is_pkg "$1"; then usage_error "launch takes one package name"; fi ;;
+    home)
+        if [ $# -gt 1 ] || { [ "${1:-show}" != show ] && ! is_pkg "$1"; }; then
+            usage_error "home takes a package name, or show"
+        fi ;;
+    dns)
+        [ $# -le 1 ] || usage_error "dns takes one hostname, off, auto or show"
+        case ${1:-show} in
+            show|off|auto) ;;
+            *) is_host "$1" || usage_error "Private DNS needs a hostname such as dns.example.com, not '$1'" ;;
+        esac ;;
+    sleep)
+        [ $# -le 1 ] || usage_error "sleep takes 1 to 35791 minutes, never or show"
+        case ${1:-show} in
+            show|never) ;;
+            *) valid_minutes "$1" || usage_error "sleep takes 1 to 35791 minutes, never or show" ;;
+        esac ;;
+    *) usage_error "unknown command '$cmd'" ;;
 esac
+connect; load_profile; check_serial; "cmd_$cmd" "$@"

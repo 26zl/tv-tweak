@@ -205,5 +205,34 @@ t "a TV with another serial is refused" 1 "$(rc other debloat)"
 tv gone; touch "$T/tv-gone/unplugged"
 t "no device is an error" 1 "$(rc gone verify)"
 
+# Asking for help, or making a typo, never reaches the TV.
+tv args
+for c in dns tune restore apps debloat; do
+    t "'$c --help' prints usage and exits 0" 0 "$(rc args "$c" --help)"
+done
+t "... and changed nothing on the TV" "null 1.0" \
+  "$(setting args global private_dns_specifier) $(setting args global window_animation_scale)"
+t "--version needs no device" "tweak 0.1.0" "$(run gone --version)"
+t "an unknown command exits 2" 2 "$(rc args resotre)"
+t "... and says so on stderr only" "error: unknown command 'resotre'|" \
+  "$(run args resotre 2>&1 >/dev/null | head -1)|$(run args resotre 2>/dev/null)"
+t "no command exits 2" 2 "$(rc args)"
+t "--device after the command is honoured" 1 "$(rc args verify --device no-such-profile)"
+t "a profile name is a name, not a path" 2 "$(rc args --device ../../tmp verify)"
+t "an unknown tier is refused" 1 "$(rc args debloat alexaa)"
+t "... before anything is disabled" "$(disabled gone)" "$(disabled args)"
+t "dns refuses shell syntax" 2 "$(rc args dns 'dns.example;reboot')"
+t "... and the TV never ran it" none "$(cat "$T/tv-args/reboots" 2>/dev/null || echo none)"
+t "dns refuses an IP address" 2 "$(rc args dns 1.1.1.1)"
+t "dns refuses a name without a dot" 2 "$(rc args dns example)"
+t "dns sets a hostname" "0 dns.example.com hostname" \
+  "$(rc args dns dns.example.com) $(setting args global private_dns_specifier) $(setting args global private_dns_mode)"
+t "dns auto restores Android's default mode" "0 opportunistic" \
+  "$(rc args dns auto) $(setting args global private_dns_mode)"
+t "launch refuses shell syntax" 2 "$(rc args launch 'x;reboot')"
+t "sleep refuses 0" 2 "$(rc args sleep 0)"
+t "sleep refuses more than fits in 32-bit milliseconds" 2 "$(rc args sleep 35792)"
+t "sleep takes minutes" "0 1800000" "$(rc args sleep 30) $(setting args system screen_off_timeout)"
+
 [ "$fail" -eq 0 ] && echo "all passed" || echo "FAILURES"
 exit "$fail"
