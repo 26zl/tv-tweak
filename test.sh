@@ -119,8 +119,8 @@ for d in devices/*/; do
               { conf_lines "$d/keep.conf"; printf '%s\n' $media_apps; } | LC_ALL=C sort -u > "$lab/keep"
               LC_ALL=C comm -12 "$lab/pkgs" "$lab/keep")
     t "$p: packages.conf does not fight keep.conf or media_apps" "" "$overlap"
-    t "$p: apps.conf entries are <pkg>|<url>|<sha256> or <pkg>|play|" "" \
-      "$(printf '%s\n' "$APPS" | grep -v '^$' | grep -vE '^[a-z0-9_.]+\|(https://[^|]+\|[0-9a-f]{64}|play\|)$' || true)"
+    t "$p: apps.conf entries are <pkg>|<url>|<sha256> or <pkg>|play|, then optionally |optional" "" \
+      "$(printf '%s\n' "$APPS" | grep -v '^$' | grep -vE '^[a-z0-9_.]+\|(https://[^|]+\|[0-9a-f]{64}|play\|)(\|optional)?$' || true)"
     t "$p: settings.conf lines are <ns> <key> <value>" "" \
       "$(printf '%s\n' "$SETTINGS" | grep -v '^[[:space:]]*$' | awk 'NF != 3 {print}')"
 done

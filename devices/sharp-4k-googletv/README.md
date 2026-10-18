@@ -77,10 +77,10 @@ Auto-update apps if you want updates to wait for you.
 | App | Package | Why |
 | --- | --- | --- |
 | TV Bro 2.1.6 | `com.phlox.tvwebbrowser` | D-pad browser; the `geckoExcluded` build is 6.8 MB against 150 MB |
-| Obtainium 1.6.10 | `dev.imranr.obtainium` | Installs and updates apps from GitHub releases |
+| Obtainium 1.6.17 | `dev.imranr.obtainium` | Installs and updates apps from GitHub releases |
 | F-Droid | `org.fdroid.fdroid` | FOSS repository; no leanback icon, use `launch` |
-| Mullvad 2026.8 | `net.mullvad.mullvadvpn` | VPN, with a proper leanback icon |
-| SmartTube 32.10 | `org.smarttube.stable` | YouTube without ads, built for a remote |
+| Mullvad 2026.12 | `net.mullvad.mullvadvpn` | VPN, with a proper leanback icon |
+| SmartTube 32.56 | `org.smarttube.stable` | Optional, installed only by `./tweak.sh apps org.smarttube.stable`: YouTube without ads, which YouTube says breaks its Terms of Service; see the note in `apps.conf` |
 | Kodi 21.3 | `org.xbmc.kodi` | Media centre; the pinned checksum matches the one Kodi publishes |
 | Projectivy Launcher | `com.spocky.projengmenu` | Ad-free launcher, from the Play Store |
 

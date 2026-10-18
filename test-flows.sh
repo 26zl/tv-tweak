@@ -392,6 +392,56 @@ t "... and leaves the TV and the record as they were" "same same" \
   "$([ "$(snap)" = "$after" ] && echo same) $([ "$(cat "$(state dry)/applied.txt")" = "$list" ] && echo same)"
 t "--dry-run is refused where nothing changes" 2 "$(rc dry verify --dry-run)"
 
+# apps installs what is missing, checks every download, and records what it added.
+mkdir -p "$T/curlbin"
+cat > "$T/curlbin/curl" <<'EOF'
+#!/bin/sh
+# Fake curl: serves "pkg:<name>" for the URLs in $FAKE_CURL_MAP, 404 for anything else.
+out=; url=
+while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift ;; -*) ;; *) url=$1 ;; esac; shift; done
+echo "$url" >> "$FAKE_CURL_MAP.log"
+pkg=$(awk -v u="$url" '$1 == u {print $2}' "$FAKE_CURL_MAP")
+[ -n "$pkg" ] || { echo 'curl: (22) The requested URL returned error: 404' >&2; exit 22; }
+printf 'pkg:%s\n' "$pkg" > "$out"
+EOF
+chmod +x "$T/curlbin/curl"
+sum() { if command -v sha256sum >/dev/null 2>&1; then printf 'pkg:%s\n' "$1" | sha256sum | cut -d' ' -f1; else printf 'pkg:%s\n' "$1" | shasum -a 256 | cut -d' ' -f1; fi; }
+copy ap; A=$T/ap/devices/firetv-stick-4k-max-2023/apps.conf
+{
+    echo "com.example.a|https://example.com/a.apk|$(sum com.example.a)"
+    echo "com.example.opt|https://example.com/opt.apk|$(sum com.example.opt)|optional"
+    echo "com.example.bad|https://example.com/bad.apk|$(sum something.else)"
+    echo "com.example.fd|https://f-droid.org/repo/fd.apk|$(sum com.example.fd)"
+} > "$A"
+printf '%s %s\n' https://example.com/a.apk com.example.a https://example.com/opt.apk com.example.opt \
+    https://example.com/bad.apk com.example.bad https://f-droid.org/archive/fd.apk com.example.fd > "$T/curlmap"
+apps() { FAKE_CURL_MAP=$T/curlmap PATH=$T/curlbin:$PATH TWEAK_SH=$T/ap/tweak.sh run ap "$@"; }
+tv ap
+t "apps exits 1 when one app fails its checksum" 1 "$(if apps apps >/dev/null 2>&1; then echo 0; else echo $?; fi)"
+t "... but installs the rest, F-Droid from archive/, and skips optional ones" "com.example.a com.example.fd" \
+  "$(sort "$T/tv-ap/thirdparty" | tr '\n' ' ' | sed 's/ $//')"
+t "... and records what it added" "com.example.a com.example.fd" "$(sort "$(state ap)/apps.txt" | tr '\n' ' ' | sed 's/ $//')"
+: > "$T/curlmap.log"; apps apps >/dev/null 2>&1 || true
+t "a second run downloads only what is still missing" "https://example.com/bad.apk" "$(cat "$T/curlmap.log")"
+t "an optional app installs when named" "0 yes" \
+  "$(if apps apps com.example.opt >/dev/null 2>&1; then echo 0; else echo $?; fi) $(grep -qx com.example.opt "$T/tv-ap/thirdparty" && echo yes)"
+t "an app not in apps.conf is refused" 1 "$(if apps apps com.example.nope >/dev/null 2>&1; then echo 0; else echo $?; fi)"
+apps restore >/dev/null 2>&1 || true
+t "restore leaves sideloads alone without --apps" "yes" "$(grep -qx com.example.a "$T/tv-ap/thirdparty" && echo yes)"
+t "restore --apps removes everything apps added" "0 none" \
+  "$(if apps restore --apps >/dev/null 2>&1; then echo 0; else echo $?; fi) $(if [ -s "$T/tv-ap/thirdparty" ]; then cat "$T/tv-ap/thirdparty"; else echo none; fi)"
+
+# restore also puts the launcher back.
+tv hm; echo com.example.launcher/.Home >> "$T/tv-hm/home_candidates"; echo com.example.launcher >> "$T/tv-hm/installed"
+run hm debloat >/dev/null 2>&1; run hm home com.example.launcher >/dev/null 2>&1
+t "home changes the launcher" "com.example.launcher/.Home" "$(cat "$T/tv-hm/home")"
+run hm restore >/dev/null 2>&1
+t "restore puts the previous launcher back" "com.amazon.tv.launcher/.ui.HomeActivity_vNext" "$(cat "$T/tv-hm/home")"
+
+# Started through a symlink, as from ~/bin, it still finds its profiles.
+copy ln; mkdir -p "$T/lnbin"; ln -s "$T/ln/tweak.sh" "$T/lnbin/tweak"
+tv ln; t "a symlink to tweak.sh still finds devices/" 0 "$(TWEAK_SH=$T/lnbin/tweak rc ln verify)"
+
 # keep.conf protects whatever the spelling, and a profile that cannot be read safely stops the run.
 copy kc; P=$T/kc/devices/firetv-stick-4k-max-2023
 printf 'ads\tcom.amazon.firebat\t# a bad edit\n' >> "$P/packages.conf"

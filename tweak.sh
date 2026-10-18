@@ -4,7 +4,13 @@
 set -eu
 
 VERSION=0.1.0
-HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# Follow links to the script itself, so a symlink in ~/bin still finds devices/.
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in /*) self=$link ;; *) self=$(dirname -- "$self")/$link ;; esac
+done
+HERE=$(CDPATH='' cd -- "$(dirname -- "$self")" && pwd)
 DEVICE=${DEVICE:-}
 ADB=${ADB:-adb}
 # Android Studio installs platform-tools but does not put it on PATH. Only guess when the caller
@@ -25,7 +31,7 @@ if [ -n "${TWEAK_STATE:-}" ]; then STATE_ROOT=$TWEAK_STATE
 elif [ "$(uname -s)" = Darwin ]; then STATE_ROOT="$HOME/Library/Application Support/tv-tweak"
 else STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/tv-tweak"
 fi
-STATE=; LOGGING=; NEW_DEVICE=; FORCE=; DRY_RUN=
+STATE=; LOGGING=; NEW_DEVICE=; FORCE=; DRY_RUN=; WITH_APPS=
 
 die() { echo "error: $*" >&2; if [ -n "$LOGGING" ]; then log "error: $*"; fi; exit 1; }
 usage_error() { echo "error: $*" >&2; echo "see: $0 --help" >&2; exit 2; }
@@ -44,6 +50,7 @@ is_host() {
     case $1 in *.*) return 0 ;; esac
     return 1
 }
+is_component() { case $1 in */*) is_pkg "${1%%/*}" && case ${1#*/} in ''|*[!A-Za-z0-9_.\$]*) false ;; esac ;; *) false ;; esac; }
 valid_minutes() { case $1 in ''|0*|*[!0-9]*|??????*) return 1 ;; esac; [ "$1" -le 35791 ]; }
 NL='
 '
@@ -155,8 +162,9 @@ bad_lines() {
                       case $ns in global|secure|system) ;; *) echo "  $ns $key"; continue ;; esac
                       { is_tok "${key:-}" && is_tok "${value:-}" && [ -z "${rest:-}" ]; } || echo "  $ns ${key:-} ${value:-} ${rest:-}"
                   done ;;
-        apps)     conf_lines "$1" | while IFS='|' read -r pkg url sum rest; do
+        apps)     conf_lines "$1" | while IFS='|' read -r pkg url sum flag rest; do
                       if ! is_pkg "$pkg" || [ -n "${rest:-}" ]; then echo "  $pkg"; continue; fi
+                      case ${flag:-} in ''|optional) ;; *) echo "  $pkg: the fourth field can only be 'optional'" ;; esac
                       case $url in
                           play) [ -z "$sum" ] || echo "  $pkg: a play entry takes no checksum" ;;
                           https://*) case $sum in *[!0-9a-f]*|'') echo "  $pkg: checksum is not hex" ;; esac
@@ -510,8 +518,10 @@ restore_cmd() {
 
 cmd_restore() {
     applied=$APPLIED
-    [ -s "$applied" ] || [ -s "$SETTINGS_FILE" ] \
-        || die "nothing to restore: no packages or settings recorded in $STATE"
+    if [ ! -s "$applied" ] && [ ! -s "$SETTINGS_FILE" ] && [ ! -s "$STATE/home.txt" ] \
+        && { [ -z "$WITH_APPS" ] || [ ! -s "$STATE/apps.txt" ]; }; then
+        die "nothing to restore: no packages, settings or launcher recorded in $STATE"
+    fi
     if [ -n "$DRY_RUN" ]; then
         if [ -s "$applied" ]; then
             while read -r p; do [ -z "$p" ] || echo "  would re-enable $p"; done < "$applied"
@@ -520,6 +530,10 @@ cmd_restore() {
             while read -r ns key val old; do
                 case $old in null|'') echo "  would unset $key" ;; *) echo "  would restore $key = $old" ;; esac
             done < "$SETTINGS_FILE"
+        fi
+        if [ -s "$STATE/home.txt" ]; then echo "  would set home back to $(cat "$STATE/home.txt")"; fi
+        if [ -n "$WITH_APPS" ] && [ -s "$STATE/apps.txt" ]; then
+            while read -r p; do [ -z "$p" ] || echo "  would uninstall $p"; done < "$STATE/apps.txt"
         fi
         return 0
     fi
@@ -565,6 +579,30 @@ cmd_restore() {
         k=$(grep -c . "$SETTINGS_FILE.left" || true)
         if [ "$k" -gt 0 ]; then mv "$SETTINGS_FILE.left" "$SETTINGS_FILE"; left=$((left + k)); else rm -f "$SETTINGS_FILE" "$SETTINGS_FILE.left"; fi
     fi
+    if [ -z "$gone" ] && [ -s "$STATE/home.txt" ]; then
+        was=$(cat "$STATE/home.txt")
+        if is_component "$was" && sh_ cmd package set-home-activity "$(q "$was")" --user 0 >/dev/null 2>&1; then
+            echo "  home is $was again"; rm -f "$STATE/home.txt"
+        else
+            echo "  FAILED   could not set home back to $was" >&2; left=$((left + 1))
+        fi
+    fi
+    if [ -z "$gone" ] && [ -s "$STATE/apps.txt" ]; then
+        if [ -z "$WITH_APPS" ]; then
+            echo "left installed (added by apps; restore --apps removes them): $(tr '\n' ' ' < "$STATE/apps.txt")"
+        else
+            : > "$STATE/apps.txt.left"
+            while read -r p; do
+                [ -n "$p" ] || continue
+                if out=$(timed 120 "$ADB" -s "$DEVICE" uninstall "$p" 2>&1 </dev/null); then
+                    echo "  uninstalled $p"
+                else
+                    rc=$?; echo "  FAILED   $p: $(reason "$out" "$rc" 120)" >&2; echo "$p" >> "$STATE/apps.txt.left"; left=$((left + 1))
+                fi
+            done < "$STATE/apps.txt"
+            if [ -s "$STATE/apps.txt.left" ]; then mv "$STATE/apps.txt.left" "$STATE/apps.txt"; else rm -f "$STATE/apps.txt" "$STATE/apps.txt.left"; fi
+        fi
+    fi
     [ -z "$gone" ] || die "lost the connection to $DEVICE; $left entries are still recorded — run restore again when the TV is back"
     if [ "$left" -gt 0 ]; then
         echo "error: $left entries could not be restored and are still recorded; fix the cause above and run restore again" >&2
@@ -592,21 +630,28 @@ EOF
 }
 cmd_perf() { cmd_tune "$@"; }
 
+# Installs what apps.conf lists, or only the packages named; entries marked optional only when named.
+# An app that is already there, at any version, is left alone: reinstalling kills it (a running VPN
+# drops), and one that updated itself would fail as a downgrade.
 cmd_apps() {
-    if [ -n "$DRY_RUN" ]; then
-        while IFS='|' read -r name url _; do
-            [ -z "$name" ] || echo "  would install $name from $url"
-        done <<EOF
-$APPS
-EOF
-        return 0
-    fi
-    # Removed by on_exit; an interrupt ends the run through the same path, so the download goes too.
+    for p in "$@"; do
+        printf '%s\n' "$APPS" | awk -F'|' -v p="$p" '$1 == p {f = 1} END {exit !f}' \
+            || die "$p is not in $PROFILE's apps.conf"
+    done
+    command -v curl >/dev/null 2>&1 || [ -n "$DRY_RUN" ] || die "apps needs curl to download; install it first"
+    all=$(pkg_list '') || exit 1
+    # Removed by on_exit; an interrupt ends the run through the same path, so a download goes too.
     tmp=$(mktemp -d)
     fail=0
-    # Fed by redirect, not a pipe: a checksum mismatch must abort the script, not a subshell.
-    while IFS='|' read -r name url want; do
+    while IFS='|' read -r name url want flag; do
         [ -n "$name" ] || continue
+        if [ $# -gt 0 ]; then
+            case " $* " in *" $name "*) ;; *) continue ;; esac
+        elif [ "${flag:-}" = optional ]; then
+            continue
+        fi
+        if printf '%s\n' "$all" | grep -qxF -- "$name"; then echo "  ok   $name is already installed"; continue; fi
+        if [ -n "$DRY_RUN" ]; then echo "  would install $name from $url"; continue; fi
         if [ "$url" = play ]; then
             if sh_ am start -a android.intent.action.VIEW -d "$(q "market://details?id=$name")" >/dev/null 2>&1; then
                 echo "  $name: Play Store listing opened on the TV — press Install with the remote"
@@ -616,18 +661,37 @@ EOF
             continue
         fi
         echo "  fetching $name"
-        curl -fsSL -o "$tmp/$name.apk" "$url" || die "download failed: $name"
-        got=$(sha256 "$tmp/$name.apk")
-        [ "$got" = "$want" ] || die "checksum mismatch for $name — refusing to install"
-        if out=$(timed 900 "$ADB" -s "$DEVICE" install -r "$tmp/$name.apk" 2>&1 </dev/null); then
-            echo "  installed $name"
+        if ! fetch "$url" "$tmp/$name.apk"; then
+            echo "  FAILED   $name: download failed" >&2; fail=$((fail + 1)); continue
+        fi
+        if [ "$(sha256 "$tmp/$name.apk")" != "$want" ]; then
+            echo "  FAILED   $name: checksum mismatch — not installed" >&2; fail=$((fail + 1)); continue
+        fi
+        if out=$(timed 900 "$ADB" -s "$DEVICE" install "$tmp/$name.apk" 2>&1 </dev/null); then
+            echo "  installed $name"; echo "$name" >> "$STATE/apps.txt"
         else
             rc=$?; echo "  FAILED   $name: $(reason "$out" "$rc" 900)" >&2; fail=$((fail + 1))
         fi
+        rm -f "$tmp/$name.apk"
     done <<EOF
 $APPS
 EOF
     [ "$fail" -eq 0 ]
+}
+
+# HTTPS only, redirects included, with limits. F-Droid moves a version from repo/ to archive/ once
+# newer ones replace it, under the same name and checksum.
+fetch() {
+    if curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 1800 --retry 2 \
+            -o "$2" "$1"; then
+        return 0
+    fi
+    case $1 in
+        https://f-droid.org/repo/*)
+            curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 1800 --retry 2 \
+                -o "$2" "https://f-droid.org/archive/${1#https://f-droid.org/repo/}" ;;
+        *) return 1 ;;
+    esac
 }
 
 cmd_verify() {
@@ -700,12 +764,12 @@ cmd_verify() {
     fi
 
     echo "--- sideloaded apps present ---"
-    installed=$(pkg_list -3) || exit 1
-    while IFS='|' read -r pkg _ _; do
+    installed=$(pkg_list '') || exit 1
+    while IFS='|' read -r pkg _ _ flag; do
         [ -n "$pkg" ] || continue
         if printf '%s\n' "$installed" | grep -qxF -- "$pkg"; then
             echo "  ok   $pkg"
-        else
+        elif [ "${flag:-}" != optional ]; then
             echo "  --   $pkg not installed (run: $0 apps)"
         fi
     done <<EOF
@@ -797,6 +861,12 @@ cmd_home() {
             comp=$(printf '%s\n' "$list" | awk -v p="$1/" 'index($1, p) == 1 {print $1; exit}')
             [ -n "$comp" ] || die "$1 is not installed or has no HOME activity"
             if [ -n "$DRY_RUN" ]; then echo "  would set home to $comp"; return 0; fi
+            # The launcher it replaces is kept for restore, the first time only.
+            if [ ! -s "$STATE/home.txt" ]; then
+                was=$(home_activity) || die "could not read the current launcher from $DEVICE"
+                is_component "$was" || die "the current launcher '$was' is not a component name this tool can record"
+                echo "$was" > "$STATE/home.txt"
+            fi
             sh_ cmd package set-home-activity "$comp" --user 0 >/dev/null 2>&1 || die "could not set $comp as home"
             echo "home = $comp"
             ;;
@@ -816,9 +886,9 @@ usage: $(basename "$0") [options] <command> [arguments]
   info                  device summary
   backup                snapshot which packages are already disabled
   debloat [tiers...]    disable packages (default tiers come from the profile)
-  restore               undo this tool: re-enable its packages and roll settings back
+  restore [--apps]      undo this tool: packages, settings and launcher; --apps also removes its sideloads
   tune                  apply the profile's settings.conf, trim caches ('perf' is an old name)
-  apps                  sideload the profile's apps.conf (checksum-pinned)
+  apps [package...]     sideload the profile's apps.conf (checksum-pinned); optional ones by name
   verify                DRM props, protected packages, drift, launcher
   status                list currently disabled packages
   launch <package>      start an app that has no home-screen icon (e.g. F-Droid)
@@ -863,6 +933,7 @@ while [ $# -gt 0 ]; do
         --new-device) NEW_DEVICE=1 ;;
         --force)   FORCE=1 ;;
         --dry-run) DRY_RUN=1 ;;
+        --apps)    WITH_APPS=1 ;;
         -*)        usage_error "unknown option '$1'" ;;
         *)  if [ -z "$cmd" ]; then cmd=$1
             elif is_tok "$1"; then args="$args $1"
@@ -874,6 +945,7 @@ done
 [ -n "$cmd" ] || { usage >&2; exit 2; }
 if [ -n "$PROFILE" ] && ! is_profile "$PROFILE"; then usage_error "invalid profile name '$PROFILE'"; fi
 if [ -n "$DEEP" ] && [ "$cmd" != verify ]; then usage_error "--deep only applies to verify"; fi
+if [ -n "$WITH_APPS" ] && [ "$cmd" != restore ]; then usage_error "--apps only applies to restore"; fi
 case $DRY_RUN:$cmd in
     1:info|1:verify|1:status|1:launch|1:help) usage_error "--dry-run applies to commands that change something" ;;
 esac
@@ -882,8 +954,10 @@ set -- $args
 # Arguments are checked here, before connecting, so a typo costs nothing on the TV.
 case $cmd in
     help) usage; exit 0 ;;
-    info|backup|restore|tune|perf|apps|verify|status)
+    info|backup|restore|tune|perf|verify|status)
         [ $# -eq 0 ] || usage_error "$cmd takes no arguments" ;;
+    apps)
+        for p in "$@"; do is_pkg "$p" || usage_error "apps takes package names from apps.conf"; done ;;
     debloat) ;;
     launch)
         if [ $# -ne 1 ] || ! is_pkg "$1"; then usage_error "launch takes one package name"; fi ;;

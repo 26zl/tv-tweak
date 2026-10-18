@@ -46,9 +46,9 @@ export DEVICE=192.168.1.50:5555        # only if several devices are attached
   info                  device summary
   backup                snapshot which packages are already disabled (the first one is kept as the baseline)
   debloat [tiers...]    disable packages (default tiers come from the profile)
-  restore               re-enable the packages this tool disabled and roll its settings back
+  restore [--apps]      undo this tool: its packages, settings and launcher; --apps also its sideloads
   tune                  apply the profile's settings.conf, trim caches
-  apps                  sideload the profile's apps.conf (checksum-pinned)
+  apps [package...]     sideload the profile's apps.conf (checksum-pinned); optional ones by name
   verify                DRM props, protected packages, drift, launcher
   status                list currently disabled packages
   launch <package>      start an app with no home-screen icon
@@ -104,7 +104,7 @@ devices/<profile>/
   device.conf      model, device codename, default tiers, accepted launchers, props to verify
   packages.conf    tiered package list with rationale
   keep.conf        packages that are never disabled, whatever packages.conf says
-  apps.conf        sideload targets as <package>|<url>|<sha256>; `play` as url opens the store
+  apps.conf        sideload targets as <package>|<url>|<sha256>[|optional]; `play` as url opens the store
   settings.conf    <namespace> <key> <value> lines applied by `tune`
 ```
 
@@ -129,8 +129,11 @@ streaming app; it takes over the TV.
 `verify` shows the DRM flags are advertised, not that a licence was fetched. Playback was confirmed
 by hand on each verified device after the full debloat and `tune`.
 
-`apps` downloads over HTTPS and aborts on a checksum mismatch; the pins are recorded in each
-`apps.conf` together with the date. Both verified devices are 32-bit (`armeabi-v7a`) and reject
+`apps` downloads over HTTPS only, redirects included, and refuses any APK whose checksum differs
+from the pin; each pin in `apps.conf` was checked against the digest its project publishes, on the
+date given. An app that is already installed is left alone, whatever its version, and entries
+marked `optional` are installed only when named. What `apps` installs is recorded, and
+`restore --apps` removes it. Both verified devices are 32-bit (`armeabi-v7a`) and reject
 `arm64-v8a`-only builds.
 
 ## Layout
