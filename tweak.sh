@@ -463,8 +463,8 @@ cmd_backup() {
 check_tiers() {
     for t in "$@"; do
         conf_lines "$CONF" | awk -v t="$t" '$1 == t {found = 1} END {exit !found}' || {
-            others=$(conf_lines "$CONF" | awk '{print $1}' | uniq \
-                | while read -r x; do case " $tiers " in *" $x "*) ;; *) printf '%s ' "$x" ;; esac; done)
+            # awk, not a case inside $( ): macOS's /bin/sh, bash 3.2, cannot parse that.
+            others=$(conf_lines "$CONF" | awk -v d=" $tiers " '!seen[$1]++ && !index(d, " " $1 " ") {printf "%s ", $1}')
             die "unknown tier '$t'. $PROFILE tiers: $tiers (default); ${others% } (opt-in)"
         }
     done
