@@ -3,9 +3,9 @@
 [![ci](https://github.com/26zl/tv-tweak/actions/workflows/ci.yml/badge.svg)](https://github.com/26zl/tv-tweak/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Debloat and tune Android TV devices over ADB. No root, fully reversible, keeps DRM playback
-working. One generic POSIX `sh` script; everything that depends on the device lives in a profile
-directory under `devices/`.
+Debloat and tune Fire TV and Google TV devices over ADB, without root. `restore` undoes what the
+tool changed, and the packages that playback and DRM depend on are never touched. One generic POSIX
+`sh` script; everything that depends on the device lives in a profile directory under `devices/`.
 
 | Profile | Device | Verified on |
 | --- | --- | --- |
@@ -18,6 +18,12 @@ the Prime Video app; `com.mediatek.tv.oneworld.tvcenter` looks like bloat and is
 switcher. The logic is `pm disable-user` in a loop — the value is the curated list.
 
 ## Setup
+
+```sh
+git clone https://github.com/26zl/tv-tweak.git && cd tv-tweak
+./tweak.sh --version
+git pull          # later, to update; CHANGELOG.md says what changed
+```
 
 Needs `adb` and `curl` on the host, and ADB debugging on the device — each profile's README has
 the steps. Android Studio installs `platform-tools` without putting it on `PATH`, so the standard
@@ -151,6 +157,36 @@ marked `optional` are installed only when named. What `apps` installs is recorde
 `restore --apps` removes it. Both verified devices are 32-bit (`armeabi-v7a`) and reject
 `arm64-v8a`-only builds.
 
+## Undo and uninstall
+
+To return a TV to how it was and stop using the tool:
+
+1. `./tweak.sh restore --apps` re-enables what the tool disabled, rolls its settings back, puts
+   the previous launcher back and uninstalls what `apps` installed. It exits 1 if anything is left;
+   fix the cause it prints and run it again until it exits 0. `status` lists what is still
+   disabled.
+2. `./tweak.sh adb-off`, or turn off ADB and wireless debugging under Developer options.
+3. Only then delete the clone and the TV's state directory (see [Layout](#layout)): until `restore`
+   has finished, the state directory is the only record of what to undo.
+
+Not undone: caches trimmed by `tune`, apps installed by hand from the Play Store, and filtering
+set up on your DNS resolver.
+
+## Troubleshooting
+
+- **"no device" / "several devices found"**: set `DEVICE=<ip>:<port>`; `adb devices` and
+  `adb mdns services` show what adb sees.
+- **"this TV (serial …) is new to profile …"**: `DEVICE` points at a TV the profile has not
+  changed before. Fix `DEVICE`, or add `--new-device` once for a second TV of the same model.
+- **"this TV is '…', but profile … was built for '…'"**: the profile is for another device. Compare
+  with `./tweak.sh --device <profile> verify` before reaching for `--force`.
+- **"No internet" after `dns`**: the resolver was not reachable over DNS-over-TLS (port 853).
+  `./tweak.sh dns auto` returns to Android's default; see the device README.
+- **`verify` reports drift after a reboot or an update**: re-run the command it names, for example
+  `./tweak.sh debloat alexa`.
+- **A command stops with "no answer within 60s"**: the TV went to sleep or dropped off the
+  network. Wake it and run the command again; what was done so far is recorded.
+
 ## Layout
 
 ```text
@@ -177,6 +213,16 @@ Every command that changes something prints the path.
 
 Keep it until you have run `restore`: it is the only record of what to undo. State from earlier
 versions, in `backups/<profile>/` inside the clone, moves there the first time its TV is connected.
+
+## Notices
+
+Use at your own risk. The tool changes system settings and disables preinstalled software on a
+device you own; it is provided as is, without warranty (see [LICENSE](LICENSE)). Apps installed by
+`apps` come from their publishers, under their own licences and terms.
+
+Not affiliated with or endorsed by Amazon, Google, Sharp or the publishers of the listed apps.
+Amazon, Fire TV and all related marks are trademarks of Amazon.com, Inc. or its affiliates. Android,
+Google TV and YouTube are trademarks of Google LLC. Other names belong to their owners.
 
 ## License
 

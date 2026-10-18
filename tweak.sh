@@ -830,8 +830,12 @@ cmd_status() { list=$(pkg_list -d) || exit 1; printf '%s\n' "$list" | sed '/^$/d
 cmd_sleep() {
     case "${1:-show}" in
         show)
-            echo "  screen_off_timeout $(sh_ settings get system screen_off_timeout | tr -d '\r') ms"
-            echo "  sleep_timeout      $(sh_ settings get secure sleep_timeout | tr -d '\r') ms"
+            for x in "system screen_off_timeout" "secure sleep_timeout"; do
+                # shellcheck disable=SC2086  # namespace and key, split on purpose
+                v=$(dev settings get $x) || die "could not read ${x#* } from $DEVICE"
+                case $v in null) v="not set (the TV's default)" ;; 2147483647) v=never ;; *) v="$v ms" ;; esac
+                printf '  %-19s %s\n' "${x#* }" "$v"
+            done
             return 0
             ;;
         never) ms=2147483647 ;;
@@ -848,8 +852,12 @@ cmd_sleep() {
 cmd_dns() {
     case "${1:-show}" in
         show)
-            sh_ 'settings get global private_dns_mode; settings get global private_dns_specifier'
-            sh_ dumpsys connectivity | grep -oE 'UsePrivateDns: [a-z]+|ValidatedPrivateDnsAddresses: \[[^]]*\]' | sort -u
+            mode=$(dev settings get global private_dns_mode) || die "could not read private_dns_mode from $DEVICE"
+            host=$(dev settings get global private_dns_specifier) || die "could not read private_dns_specifier from $DEVICE"
+            case $mode in null) mode="not set (Android's default, opportunistic)" ;; esac
+            printf '  %-9s %s\n' mode "$mode" host "$host"
+            conn=$(dev dumpsys connectivity) || die "could not read the connectivity state from $DEVICE"
+            printf '%s\n' "$conn" | grep -oE 'UsePrivateDns: [a-z]+|ValidatedPrivateDnsAddresses: \[[^]]*\]' | sort -u | sed 's/^/  /' || true
             ;;
         off)
             put_setting global private_dns_mode off

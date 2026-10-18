@@ -352,6 +352,13 @@ t "... and with --new-device keeps its own record" "disabled 1" \
 t "... while the first TV can still be restored" "0 3" \
   "$(if both a restore >/dev/null 2>&1; then echo 0; else echo $?; fi) $(setting a secure location_mode)"
 
+# show reads plainly.
+tv show
+t "sleep show says when a timer is not set" "yes" \
+  "$(run show sleep show | grep -q '^  screen_off_timeout  *not set' && echo yes || echo no)"
+t "dns show says when the mode is Android's default" "yes" \
+  "$(run show dns show | grep -q "^  mode  *not set (Android's default" && echo yes || echo no)"
+
 # OTA blocking is opt-in: it stops security fixes too.
 tv ota1; run ota1 debloat >/dev/null 2>&1; run ota1 tune >/dev/null 2>&1
 t "the default tiers leave the OTA updater alone" "enabled null" \
