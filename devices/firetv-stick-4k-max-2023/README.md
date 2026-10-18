@@ -20,14 +20,15 @@ Accept the authorisation prompt on the TV the first time.
 | --- | --- | --- |
 | `ads` | yes | Content recognition, advertising ID, telemetry emitters |
 | `promo` | yes | Ambient screensaver, autoplaying trailers, store surfaces, Photos/Music |
-| `ota` | yes | Forced-update components that *can* be disabled |
-| `cruft` | yes | Tutorials, notices, stub apps, kids mode |
+| `ota` | no | Forced-update components that *can* be disabled, and `ota_disable_automatic_update`: stops firmware updates, security fixes included |
+| `cruft` | yes | Tutorials, notices, stub apps, Amazon Kids (kids mode) |
 | `alexa` | no | Voice remote stops working |
 | `smarthome` | no | Matter, Frustration Free Setup, Whisper\* discovery |
-| `aggressive` | no | Silk, Appstore, ADM push, casting — read `packages.conf` first |
+| `aggressive` | no | Silk, the Appstore's install manager, remote config and metrics delivery — read `packages.conf` first |
 | `blocked` | never | Documentation only; Fire OS refuses these |
 
-`tune` turns animations off, sets `ota_disable_automatic_update`, and turns location off.
+`tune` turns animations off and location off. `debloat ota` also sets
+`ota_disable_automatic_update`; `restore` puts it back.
 
 ## Limits without root
 
@@ -39,7 +40,10 @@ reference.
 
 **So the OTA client keeps running.** DNS is the only remaining enforcement point, and it works on
 the device: Fire OS hides the Private DNS menu, but the Android 11 resolver still honours the
-setting.
+setting. Weigh it first: blocking updates also blocks security fixes for a device that stays online,
+and an update can add packages or bring back ones this profile disabled. The `ota` tier is opt-in for
+that reason; if you block updates, unblock them now and then, update, and run `debloat` and `verify`
+again.
 
 ```sh
 ./tweak.sh dns your-profile.dns.nextdns.io

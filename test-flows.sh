@@ -31,7 +31,8 @@ case $1 in
     shell)
         shift
         n=$(( $(cat "$S/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/calls"
-        if [ -e "$S/unplugged" ] || { [ -e "$S/offline_after" ] && [ "$n" -gt "$(cat "$S/offline_after")" ]; }; then
+        if [ -e "$S/unplugged" ] || [ "$(cat "$S/settings/global/adb_enabled" 2>/dev/null)" = 0 ] \
+            || { [ -e "$S/offline_after" ] && [ "$n" -gt "$(cat "$S/offline_after")" ]; }; then
             echo "error: device '127.0.0.1:5555' not found" >&2; exit 1
         fi
         if [ -s "$S/hang_on" ]; then case "$*" in *"$(cat "$S/hang_on")"*) exec sleep 10 ;; esac; fi
@@ -350,6 +351,25 @@ t "... and with --new-device keeps its own record" "disabled 1" \
   "$(grep -qx com.amazon.tahoe "$T/tv-b/disabled" && echo disabled || echo enabled) $(setting b secure location_mode)"
 t "... while the first TV can still be restored" "0 3" \
   "$(if both a restore >/dev/null 2>&1; then echo 0; else echo $?; fi) $(setting a secure location_mode)"
+
+# OTA blocking is opt-in: it stops security fixes too.
+tv ota1; run ota1 debloat >/dev/null 2>&1; run ota1 tune >/dev/null 2>&1
+t "the default tiers leave the OTA updater alone" "enabled null" \
+  "$(grep -qx com.amazon.tv.forcedotaupdater.v2 "$T/tv-ota1/disabled" && echo disabled || echo enabled) $(setting ota1 global ota_disable_automatic_update)"
+t "debloat ota stops updates, packages and setting" "0 disabled 1" \
+  "$(rc ota1 debloat ota) $(grep -qx com.amazon.tv.forcedotaupdater.v2 "$T/tv-ota1/disabled" && echo disabled) $(setting ota1 global ota_disable_automatic_update)"
+echo 0 > "$T/tv-ota1/settings/global/ota_disable_automatic_update"
+t "verify names the tier that sets a drifted setting" "yes" \
+  "$(run ota1 verify 2>/dev/null | grep -q 'debloat ota$' && echo yes || echo no)"
+run ota1 restore >/dev/null 2>&1
+t "restore lets updates run again" "enabled null" \
+  "$(grep -qx com.amazon.tv.forcedotaupdater.v2 "$T/tv-ota1/disabled" && echo disabled || echo enabled) $(setting ota1 global ota_disable_automatic_update)"
+
+# adb-off ends the session for good.
+tv off
+t "adb-off --dry-run leaves ADB on" "0 null" "$(rc off adb-off --dry-run) $(setting off global adb_enabled)"
+t "adb-off turns ADB off" "0 0 0" "$(rc off adb-off) $(setting off global adb_enabled) $(setting off global adb_wifi_enabled)"
+t "... after which the TV no longer answers" 1 "$(rc off verify)"
 
 # A profile changes only the device it was built for, under its current name.
 tv alias

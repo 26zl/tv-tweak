@@ -55,6 +55,7 @@ export DEVICE=192.168.1.50:5555        # only if several devices are attached
   home [package|show]   show or set the launcher
   dns [host|off|auto|show]    Private DNS: a DNS-over-TLS hostname, off, or Android's default
   sleep [minutes|never|show]  display-off and device-sleep timers
+  adb-off               turn off ADB debugging when you are done
 
 options, anywhere on the line:
   --device <profile>    use devices/<profile> instead of matching the TV's model
@@ -121,10 +122,24 @@ break playback. The streaming apps named in `media_apps` are protected the same 
 closed: without a `keep.conf` that lists packages, or with a profile line it cannot read safely (a
 package name with shell syntax in it, a plain-http download, a missing checksum), nothing runs.
 Every profile file is read the same way, so CRLF endings, stray spaces and `# comments` after an
-entry are harmless; `device.conf` is read as data and never executed. `verify` checks the DRM props named in `device.conf`, that nothing kept is
-disabled, that disabled packages stayed disabled, that settings held, that sideloads are present,
-and that the home screen resolves to an accepted launcher. `--deep` also launches each installed
-streaming app; it takes over the TV.
+entry are harmless; `device.conf` is read as data and never executed.
+
+`verify` checks the DRM props named in `device.conf`, that nothing kept is disabled, that disabled
+packages stayed disabled, that settings held, that sideloads are present, and that the home screen
+resolves to an accepted launcher. `--deep` also launches each installed streaming app; it takes
+over the TV.
+
+**Firmware updates stay on by default.** Each profile has an `ota` tier that disables the
+updaters it can, and on Fire TV sets `ota_disable_automatic_update`, but it is opt-in
+(`debloat ota`): it stops security fixes too, on a device that is always online. Updates can also
+add packages or bring back disabled ones, which is why `verify` warns when the firmware build
+changed since the TV's first backup. If you block updates, lift the block now and then (`restore`
+does), update, and run `debloat` and `verify` again.
+
+**Turn ADB off when you are done.** This tool needs ADB debugging, and ADB over TCP — port 5555
+especially, which is unencrypted and advertised over mDNS — lets anything on the network that gets
+past the authorisation prompt run commands on the TV. `./tweak.sh adb-off` turns it off (the tool
+cannot reach the TV afterwards); turn it back on under Developer options when you next need it.
 
 `verify` shows the DRM flags are advertised, not that a licence was fetched. Playback was confirmed
 by hand on each verified device after the full debloat and `tune`.

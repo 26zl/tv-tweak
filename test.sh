@@ -121,8 +121,11 @@ for d in devices/*/; do
     t "$p: packages.conf does not fight keep.conf or media_apps" "" "$overlap"
     t "$p: apps.conf entries are <pkg>|<url>|<sha256> or <pkg>|play|, then optionally |optional" "" \
       "$(printf '%s\n' "$APPS" | grep -v '^$' | grep -vE '^[a-z0-9_.]+\|(https://[^|]+\|[0-9a-f]{64}|play\|)(\|optional)?$' || true)"
-    t "$p: settings.conf lines are <ns> <key> <value>" "" \
-      "$(printf '%s\n' "$SETTINGS" | grep -v '^[[:space:]]*$' | awk 'NF != 3 {print}')"
+    t "$p: settings.conf lines are <ns> <key> <value> [tier]" "" \
+      "$(printf '%s\n' "$SETTINGS" | grep -v '^[[:space:]]*$' | awk 'NF != 3 && NF != 4 {print}')"
+    t "$p: a tier named in settings.conf exists in packages.conf" "" \
+      "$(printf '%s\n' "$SETTINGS" | awk 'NF == 4 {print $4}' | sort -u | while read -r tier; do
+            conf_lines "$CONF" | awk -v t="$tier" '$1 == t {f = 1} END {exit !f}' || echo "$tier"; done)"
 done
 
 [ "$fail" -eq 0 ] && echo "all passed" || echo "FAILURES"

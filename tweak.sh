@@ -158,9 +158,10 @@ bad_lines() {
         keep)     conf_lines "$1" | while read -r pkg rest; do
                       { is_pkg "$pkg" && [ -z "${rest:-}" ]; } || echo "  $pkg ${rest:-}"
                   done ;;
-        settings) conf_lines "$1" | while read -r ns key value rest; do
+        settings) conf_lines "$1" | while read -r ns key value tier rest; do
                       case $ns in global|secure|system) ;; *) echo "  $ns $key"; continue ;; esac
-                      { is_tok "${key:-}" && is_tok "${value:-}" && [ -z "${rest:-}" ]; } || echo "  $ns ${key:-} ${value:-} ${rest:-}"
+                      { is_tok "${key:-}" && is_tok "${value:-}" && { [ -z "${tier:-}" ] || is_tok "$tier"; } \
+                        && [ -z "${rest:-}" ]; } || echo "  $ns ${key:-} ${value:-} ${tier:-} ${rest:-}"
                   done ;;
         apps)     conf_lines "$1" | while IFS='|' read -r pkg url sum flag rest; do
                       if ! is_pkg "$pkg" || [ -n "${rest:-}" ]; then echo "  $pkg"; continue; fi
@@ -499,8 +500,13 @@ cmd_debloat() {
             alive || die "lost the connection to $DEVICE; the $ok disabled so far are recorded — run debloat again when the TV is back"
         fi
     done
-    if [ -n "$DRY_RUN" ]; then echo "would disable $ok, already off $already"; return 0; fi
-    echo "disabled $ok, already off $already, failed $fail (restore list: $APPLIED)"
+    if [ -n "$DRY_RUN" ]; then echo "would disable $ok, already off $already"
+    else echo "disabled $ok, already off $already, failed $fail (restore list: $APPLIED)"
+    fi
+    if printf '%s\n' "$SETTINGS" | awk -v t=" $* " 'NF == 4 && index(t, " " $4 " ") {f = 1} END {exit !f}'; then
+        echo "settings for these tiers:"
+        apply_settings "$@" || fail=$((fail + 1))
+    fi
     [ "$fail" -eq 0 ]
 }
 
@@ -610,11 +616,14 @@ cmd_restore() {
     fi
 }
 
-cmd_tune() {
+# Settings that name a tier belong to it and are applied by `debloat <tier>`, so an opt-in tier such as
+# ota stays opt-in; tune applies the rest.
+apply_settings() {
     fail=0
     # Fed by redirect, not a pipe, so the failure count survives the loop.
-    while read -r ns key value _; do
+    while read -r ns key value tier; do
         [ -n "$key" ] || continue
+        case " $* " in *" ${tier:--} "*) ;; *) continue ;; esac
         if ! put_setting "$ns" "$key" "$value"; then
             fail=$((fail + 1))
             alive || die "lost the connection to $DEVICE; the settings written so far are recorded"
@@ -622,6 +631,12 @@ cmd_tune() {
     done <<EOF
 $SETTINGS
 EOF
+    [ "$fail" -eq 0 ]
+}
+
+cmd_tune() {
+    fail=0
+    apply_settings - || fail=1
     if [ -n "$DRY_RUN" ]; then echo "  would trim caches"
     elif sh_ pm trim-caches 4G >/dev/null 2>&1; then echo "  caches trimmed"
     else echo "  trim-caches unavailable"
@@ -748,10 +763,11 @@ cmd_verify() {
             [ -n "$key" ] || continue
             got=$(dev settings get "$ns" "$key") || die "could not read $ns $key from $DEVICE"
             if [ "$got" != "$want" ]; then
+                tier=$(printf '%s\n' "$SETTINGS" | awk -v k="$key" '$2 == k && NF == 4 {print $4; exit}')
                 case $key in
                     private_dns_*) again="$0 dns" ;;
                     screen_off_timeout|sleep_timeout) again="$0 sleep" ;;
-                    *) again="$0 tune" ;;
+                    *) if [ -n "$tier" ]; then again="$0 debloat $tier"; else again="$0 tune"; fi ;;
                 esac
                 echo "  FAIL $key is '$got', expected '$want' — re-run: $again"; drift=$((drift + 1)); rc=1
             fi
@@ -873,6 +889,19 @@ cmd_home() {
     esac
 }
 
+# ADB left on — classic TCP 5555 above all, which is unencrypted and advertised over mDNS — lets
+# anything on the network that gets past the authorisation prompt run commands on the TV. This turns
+# it off; the connection goes with it.
+cmd_adb_off() {
+    if [ -n "$DRY_RUN" ]; then echo "  would turn off ADB debugging (adb_enabled, adb_wifi_enabled)"; return 0; fi
+    sh_ 'settings put global adb_wifi_enabled 0; settings put global adb_enabled 0' >/dev/null 2>&1 || true
+    if alive; then
+        die "$DEVICE still answers; turn off USB/ADB debugging and wireless debugging under Developer options"
+    fi
+    echo "ADB debugging is off. Turn it back on under Developer options to use this tool again;"
+    echo "a reboot also clears a port opened with 'adb tcpip'."
+}
+
 # F-Droid ships no LEANBACK_LAUNCHER icon, so it never appears on a TV home screen.
 cmd_launch() {
     start_pkg "$1" || die "could not start $1"
@@ -895,6 +924,7 @@ usage: $(basename "$0") [options] <command> [arguments]
   home [package|show]   show or set the launcher
   dns [host|off|auto|show]    Private DNS: a DNS-over-TLS hostname, off, or Android's default
   sleep [minutes|never|show]  display-off and device-sleep timers, both at once
+  adb-off               turn off ADB debugging when you are done (this tool cannot reach the TV after)
 
 options, anywhere on the line:
   --device <profile>    use devices/<profile> instead of matching the TV's model
@@ -954,7 +984,7 @@ set -- $args
 # Arguments are checked here, before connecting, so a typo costs nothing on the TV.
 case $cmd in
     help) usage; exit 0 ;;
-    info|backup|restore|tune|perf|verify|status)
+    info|backup|restore|tune|perf|verify|status|adb-off)
         [ $# -eq 0 ] || usage_error "$cmd takes no arguments" ;;
     apps)
         for p in "$@"; do is_pkg "$p" || usage_error "apps takes package names from apps.conf"; done ;;
@@ -985,7 +1015,7 @@ trap 'exit 130' INT TERM HUP
 case $cmd in
     info|verify|status|launch) ;;
     *)  check_known
-        case $cmd in restore|backup) ;; *) check_model ;; esac
+        case $cmd in restore|backup|adb-off) ;; *) check_model ;; esac
         if [ -n "$DRY_RUN" ]; then
             echo "dry run: nothing on the TV or in $STATE changes"
         else
@@ -994,4 +1024,4 @@ case $cmd in
             echo "state: $STATE"
         fi ;;
 esac
-"cmd_$cmd" "$@"
+"cmd_$(printf '%s' "$cmd" | tr - _)" "$@"

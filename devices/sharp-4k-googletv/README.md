@@ -35,6 +35,10 @@ there is no prompt. The port lives in `service.adb.tcp.port`, which a reboot cle
 persistent variant is refused for the shell user — after a reboot, repeat: Wi-Fi on, wireless
 debugging, `adb tcpip 5555`, Wi-Fi off.
 
+Port 5555 is plain, unencrypted ADB, advertised over mDNS: anything on the network can reach it,
+and only the authorisation keeps it out. When you are done, run `./tweak.sh adb-off` (or reboot,
+which closes the port), and turn debugging back on when you next need the tool.
+
 `cmd wifi connect-network` is refused for the shell user on this production build (`forget-network`
 is allowed), so joining a network goes through the TV's own settings; the rest is scriptable.
 
@@ -43,8 +47,8 @@ is allowed), so joining a network goes through the TV's own settings; the rest i
 | Tier | Default | Effect |
 | --- | --- | --- |
 | `ads` | yes | Anoki ACR (fingerprints whatever is on screen), crash/usage uploaders, Privacy Sandbox, partner setup |
-| `promo` | yes | Prime Video, Play Games, YouTube Music, retail demo |
-| `ota` | yes | Vendor firmware updater; Play and GMS updates are unaffected |
+| `promo` | yes | Prime Video (so it is not on the keep list), Play Games, YouTube Music, retail demo |
+| `ota` | no | Vendor firmware updater, which also delivers security fixes; Play and GMS updates are unaffected |
 | `cruft` | yes | On-screen manual, MHEG-5 |
 | `assistant` | no | Voice search and Assistant stop working |
 | `cast` | no | Chromecast built-in, DIAL and Miracast — phones can no longer cast |
