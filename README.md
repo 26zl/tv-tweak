@@ -71,9 +71,13 @@ First run — `verify` first, so you can tell a regression from a pre-existing f
 ```
 
 `debloat` appends everything it disables to `backups/<profile>/applied.txt` and every setting
-written goes to `backups/<profile>/settings.txt` with its original value. `restore` reverses
-exactly those, so it stays correct after you edit `packages.conf` and never touches what you had
-already disabled yourself.
+written goes to `backups/<profile>/settings.txt` with its original value, recorded before the
+write. `restore` reverses exactly those, so it stays correct after you edit `packages.conf` and
+never touches what you had already disabled yourself. Packages and settings are restored
+independently; whatever fails stays recorded and `restore` exits 1, so running it again finishes
+the job. A TV that stops answering ends the run instead of turning every remaining step into a
+failure, and each adb call gives up after `TWEAK_TIMEOUT` seconds (60 by default). A read that
+fails is an error, never an empty answer.
 
 `backup` also records `ro.serialno`; every later run refuses to touch a device with a different
 serial, which guards against DHCP handing the IP to something else. `EXPECT_SERIAL=` overrides it.

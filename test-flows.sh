@@ -34,6 +34,7 @@ case $1 in
         if [ -e "$S/unplugged" ] || { [ -e "$S/offline_after" ] && [ "$n" -gt "$(cat "$S/offline_after")" ]; }; then
             echo "error: device '127.0.0.1:5555' not found" >&2; exit 1
         fi
+        if [ -s "$S/hang_on" ]; then case "$*" in *"$(cat "$S/hang_on")"*) exec sleep 10 ;; esac; fi
         PATH="$FAKE_DEV:$PATH" exec sh -c "$*" </dev/null ;;
     install)
         shift; while [ "${1#-}" != "$1" ]; do shift; done
@@ -98,7 +99,8 @@ f=$S/settings/$2/$3
 case $1 in
     get) if [ -f "$f" ]; then cat "$f"; else echo null; fi ;;
     put) if grep -qxF -- "$3" "$S/fail_put" 2>/dev/null; then echo 'simulated failure' >&2; exit 1; fi
-         mkdir -p "$S/settings/$2"; printf '%s\n' "$4" > "$f" ;;
+         mkdir -p "$S/settings/$2"; printf '%s\n' "$4" > "$f"
+         if grep -qxF -- "$3" "$S/put_then_drop" 2>/dev/null; then echo 'error: closed' >&2; exit 1; fi ;;
     delete) rm -f "$f"; echo 'Deleted 1 rows' ;;
     *) exit 1 ;;
 esac
@@ -192,7 +194,7 @@ t "verify passes after debloat and tune" 0 "$(rc rt verify)"
 t "debloat records only what it changed" "no" \
   "$(grep -qx com.amazon.dummy.music "$(state rt)/applied.txt" && echo yes || echo no)"
 run rt tune >/dev/null
-t "re-running tune keeps the first original" "1.0" \
+t "re-running tune keeps the first original" "'1.0'" \
   "$(awk '$2 == "window_animation_scale" {print $4}' "$(state rt)/settings.txt")"
 t "restore succeeds" 0 "$(rc rt restore)"
 t "restore brings back the disabled set" "$before" "$(disabled rt)"
@@ -235,6 +237,68 @@ t "launch refuses shell syntax" 2 "$(rc args launch 'x;reboot')"
 t "sleep refuses 0" 2 "$(rc args sleep 0)"
 t "sleep refuses more than fits in 32-bit milliseconds" 2 "$(rc args sleep 35792)"
 t "sleep takes minutes" "0 1800000" "$(rc args sleep 30) $(setting args system screen_off_timeout)"
+
+# restore keeps what it could not undo, and says so.
+tv pf; run pf debloat >/dev/null 2>&1; run pf tune >/dev/null 2>&1
+echo com.amazon.tv.acr > "$T/tv-pf/fail_enable"; echo location_mode > "$T/tv-pf/fail_put"
+t "restore exits 1 when an entry fails" 1 "$(rc pf restore)"
+t "... keeps the package it could not re-enable" "com.amazon.tv.acr" "$(cat "$(state pf)/applied.txt")"
+t "... keeps the setting it could not restore" "secure location_mode 0 '3'" "$(cat "$(state pf)/settings.txt")"
+t "... and verify still accounts for it" "yes" \
+  "$(run pf verify 2>/dev/null | grep -q 'all 1 still disabled' && echo yes || echo no)"
+rm "$T/tv-pf/fail_enable" "$T/tv-pf/fail_put"
+t "a second restore finishes the job" "0 3" "$(rc pf restore) $(setting pf secure location_mode)"
+t "... and leaves nothing recorded" "none" "$(ls "$(state pf)/applied.txt" "$(state pf)/settings.txt" 2>/dev/null || echo none)"
+
+tv drop; run drop debloat >/dev/null 2>&1; run drop tune >/dev/null 2>&1
+echo $(( $(cat "$T/tv-drop/calls") + 12 )) > "$T/tv-drop/offline_after"
+t "a TV that drops off mid-restore stops it with exit 1" 1 "$(rc drop restore)"
+t "... and the rest stays recorded" "yes yes" \
+  "$([ -s "$(state drop)/applied.txt" ] && echo yes) $([ -s "$(state drop)/settings.txt" ] && echo yes)"
+rm "$T/tv-drop/offline_after"
+t "... so restore can finish later" "0 $(disabled rt)" "$(rc drop restore) $(disabled drop)"
+
+tv so; run so tune >/dev/null 2>&1; run so dns dns.example.com >/dev/null 2>&1; run so sleep never >/dev/null 2>&1
+t "restore rolls settings back when no package was recorded" 0 "$(rc so restore)"
+t "... location, DNS and timers" "3 null null" \
+  "$(setting so secure location_mode) $(setting so global private_dns_mode) $(setting so system screen_off_timeout)"
+tv allon; awk '$1 ~ /^(ads|promo|ota|cruft)$/ {print $2}' "$ROOT/devices/firetv-stick-hd/packages.conf" >> "$T/tv-allon/disabled"
+run allon debloat >/dev/null 2>&1; run allon tune >/dev/null 2>&1
+t "restore works after a debloat that found everything already off" "0 3" \
+  "$(rc allon restore) $(setting allon secure location_mode)"
+
+# A read that fails is an error, never an empty answer.
+tv rd; echo com.amazon.firebat >> "$T/tv-rd/disabled"; touch "$T/tv-rd/fail_list_disabled"
+t "verify fails when the disabled list cannot be read" 1 "$(rc rd verify)"
+t "backup refuses to record an unreadable list" "1 none" "$(rc rd backup) $(ls "$(state rd)"/state-* 2>/dev/null || echo none)"
+
+# Failures carry their reason and the exit code.
+tv bl
+t "debloat exits 1 when packages fail" 1 "$(rc bl debloat blocked)"
+t "... and says why" "protected by the system" \
+  "$(run bl debloat blocked 2>&1 >/dev/null | sed -n 's/.*FAILED *[^:]*: //p' | sort -u)"
+
+# Originals are recorded before the write, and survive spaces.
+tv ahead; echo location_mode > "$T/tv-ahead/put_then_drop"
+run ahead tune >/dev/null 2>&1 || true
+rm "$T/tv-ahead/put_then_drop"; run ahead tune >/dev/null 2>&1
+t "a write that lands as the connection drops keeps the real original" "'3'" \
+  "$(awk '$2 == "location_mode" {print $4}' "$(state ahead)/settings.txt")"
+copy sp; printf 'global\tdevice_name\tTV\n' >> "$T/sp/devices/firetv-stick-hd/settings.conf"
+tv sp; echo "Living Room TV" > "$T/tv-sp/settings/global/device_name"
+TWEAK_SH=$T/sp/tweak.sh run sp tune >/dev/null 2>&1; TWEAK_SH=$T/sp/tweak.sh run sp tune >/dev/null 2>&1
+TWEAK_SH=$T/sp/tweak.sh run sp restore >/dev/null 2>&1
+t "an original with spaces comes back whole" "Living Room TV" "$(setting sp global device_name)"
+tv ml; printf 'two\nlines\n' > "$T/tv-ml/settings/global/window_animation_scale"
+t "a value that spans lines is left alone" "1 two" \
+  "$(rc ml tune) $(head -1 "$T/tv-ml/settings/global/window_animation_scale")"
+
+# A TV that stops answering does not hang the run.
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || command -v perl >/dev/null 2>&1; then
+    tv hang; echo 'disable-user --user 0 com.amazon.tv.acr' > "$T/tv-hang/hang_on"
+    t "a command that never answers times out" "1 no answer within 2s" \
+      "$(TWEAK_TIMEOUT=2 rc hang debloat ads) $(TWEAK_TIMEOUT=2 run hang debloat ads 2>&1 >/dev/null | sed -n 's/.*acr: //p')"
+fi
 
 # keep.conf protects whatever the spelling, and a profile that cannot be read safely stops the run.
 copy kc; P=$T/kc/devices/firetv-stick-hd

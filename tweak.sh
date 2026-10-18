@@ -37,11 +37,60 @@ is_host() {
     return 1
 }
 valid_minutes() { case $1 in ''|0*|*[!0-9]*|??????*) return 1 ;; esac; [ "$1" -le 35791 ]; }
+NL='
+'
+
+# Every adb call has a time limit: a TV that stops answering would otherwise hang the run. GNU
+# timeout on Linux, gtimeout from Homebrew, otherwise perl's alarm, which macOS ships. --foreground
+# keeps Ctrl+C reaching adb.
+ADB_TIMEOUT=${TWEAK_TIMEOUT:-60}
+case $ADB_TIMEOUT in ''|0*|*[!0-9]*) die "TWEAK_TIMEOUT must be a number of seconds" ;; esac
+if timeout --foreground 1 true 2>/dev/null; then TIMER='timeout --foreground'
+elif command -v timeout >/dev/null 2>&1; then TIMER=timeout
+elif command -v gtimeout >/dev/null 2>&1; then TIMER='gtimeout --foreground'
+elif command -v perl >/dev/null 2>&1; then TIMER=perl
+else TIMER=
+fi
+# shellcheck disable=SC2016,SC2086  # perl code in single quotes; TIMER may carry --foreground
+timed() {
+    secs=$1; shift
+    case $TIMER in
+        '') "$@" ;;
+        perl) perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!\n"' "$secs" "$@" ;;
+        *) $TIMER "$secs" "$@" ;;
+    esac
+}
 
 # stdin is closed: `adb shell` otherwise consumes the caller's stdin, which silently
 # swallows the rest of the input in `while read ... done < file` loops.
-sh_() { "$ADB" -s "$DEVICE" shell "$@" </dev/null; }
+sh_() { timed "$ADB_TIMEOUT" "$ADB" -s "$DEVICE" shell "$@" </dev/null; }
 kept() { printf '%s\n' "$PROTECTED" | grep -qxF -- "$1"; }
+
+# Reads from the TV. A failed read is an error, never an empty answer: an unreadable list of disabled
+# packages, as right after a reboot, once made verify print "ok" and backup record nothing.
+dev() { _out=$(sh_ "$@") || return 1; printf '%s\n' "$_out" | tr -d '\r'; }
+pkg_list() {
+    _out=$(dev "pm list packages $1") || die "could not read the package list from $DEVICE (pm list packages $1)"
+    printf '%s\n' "$_out" | sed -n 's/^package://p'
+}
+# After a failure: is the TV still answering? A lost connection stops the run instead of turning
+# every remaining step into a FAILED line.
+alive() { sh_ true >/dev/null 2>&1; }
+# The TV's own reason for a failure, short: $1 is what it printed, $2 the exit status, $3 the time
+# limit it ran under. A timed-out call ends in 124 (timeout), 142 (perl's alarm) or, when timeout's
+# own signal reaches it first, 143.
+reason() {
+    case $2 in 124|137|142|143) echo "no answer within ${3:-$ADB_TIMEOUT}s"; return ;; esac
+    case $1 in
+        *'error: device'*|*'error: closed'*|*'no devices'*|*offline*) echo "lost the connection" ;;
+        *SecurityException*|*'protected package'*) echo "protected by the system" ;;
+        *'Unknown package'*|*'Unknown component'*|*'not installed'*) echo "not installed" ;;
+        '') echo "exit status $2" ;;
+        *) printf '%s\n' "$1" | tr -d '\r' | sed '/^[[:space:]]*$/d' | tail -1 ;;
+    esac
+}
+# Quotes a value for the TV's shell, which re-parses everything `adb shell` sends.
+q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 # Every profile file goes through this one filter, so CRLF endings, stray spaces and a comment after
 # an entry mean the same everywhere; keep.conf used to read "pkg # note" as a different package and
@@ -118,7 +167,7 @@ $bad"
 # against every device.conf, which needs a connected device first.
 load_profile() {
     if [ -z "$PROFILE" ]; then
-        m=$(sh_ getprop ro.product.model | tr -d '\r')
+        m=$(dev getprop ro.product.model) || die "could not read the model from $DEVICE"
         for d in "$HERE"/devices/*/; do
             if [ -f "$d/device.conf" ] && conf_lines "$d/device.conf" | grep -qxF "model=\"$m\""; then
                 PROFILE=$(basename "$d"); break
@@ -157,26 +206,32 @@ load_profile() {
     SETTINGS_FILE=${SETTINGS_FILE:-$BACKUP_DIR/settings.txt}
 }
 
-# Every setting this tool writes is recorded so `verify` can prove it survived a reboot.
+# Every setting this tool writes is recorded first, with the value it replaces, so `verify` can prove
+# it survived a reboot and `restore` can put the original back. Recording before writing means a
+# write that lands just as the connection drops cannot leave the tuned value to be taken for the
+# original next time.
 put_setting() {
-    old=$(sh_ settings get "$1" "$2" | tr -d '\r')
-    if ! sh_ settings put "$1" "$2" "$3" >/dev/null 2>&1; then
-        echo "  FAILED $2"; return 0
+    if ! old=$(dev settings get "$1" "$2"); then
+        echo "  FAILED   $2: could not read its current value" >&2; return 1
     fi
-    mkdir -p "$BACKUP_DIR"
-    # An empty read is ambiguous: either the setting was unset, or adb glitched mid-read. Trust it
-    # as "unset" only when the write took effect; otherwise skip the backup line so a later restore
-    # cannot delete a value that was actually present.
-    if [ -z "$old" ] && [ "$(sh_ settings get "$1" "$2" | tr -d '\r')" != "$3" ]; then
-        echo "  $2 = $3 (original unreadable — not recorded for restore)"; return 0
-    fi
+    case $old in *"$NL"*) echo "  FAILED   $2: its current value spans lines; left alone" >&2; return 1 ;; esac
+    # "null" is how `settings get` says unset; any other value is kept shell-quoted, spaces and all.
+    [ "$old" = null ] || old=$(q "$old")
     # Keep the first original ever seen: re-running tune must not record our own value as the
     # thing to roll back to.
-    prev=$(awk -v n="$1" -v k="$2" '$1==n && $2==k {print $4}' "$SETTINGS_FILE" 2>/dev/null || true)
-    if [ -n "$prev" ]; then old=$prev; fi
-    { grep -v "^$1 $2 " "$SETTINGS_FILE" 2>/dev/null || true; echo "$1 $2 $3 $old"; } > "$SETTINGS_FILE.tmp"
+    if prev=$(awk -v n="$1" -v k="$2" '$1 == n && $2 == k {sub(/^[^ ]+ [^ ]+ [^ ]+ ?/, ""); print; f = 1; exit}
+                                      END {exit !f}' "$SETTINGS_FILE" 2>/dev/null); then
+        old=$prev
+    fi
+    mkdir -p "$BACKUP_DIR"
+    { awk -v n="$1" -v k="$2" '!($1 == n && $2 == k)' "$SETTINGS_FILE" 2>/dev/null || true
+      echo "$1 $2 $3 $old"; } > "$SETTINGS_FILE.tmp"
     mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-    echo "  $2 = $3"
+    if out=$(sh_ settings put "$1" "$2" "$3" 2>&1); then
+        echo "  $2 = $3"
+    else
+        rc=$?; echo "  FAILED   $2: $(reason "$out" "$rc")" >&2; return 1
+    fi
 }
 
 # macOS ships shasum but not sha256sum; most Linux distributions ship the reverse.
@@ -215,12 +270,14 @@ tier_pkgs() {
 # A launcher set with `home` is a preferred activity, which `resolve-activity` ignores on Google
 # TV in favour of the stock launcher's higher priority, so read the preference first.
 home_activity() {
-    pref=$(sh_ dumpsys package preferred-xml | tr -d '\r' | awk '
+    xml=$(dev dumpsys package preferred-xml) || return 1
+    pref=$(printf '%s\n' "$xml" | awk '
         /<item name="/ { sub(/.*<item name="/, ""); sub(/".*/, ""); item = $0 }
         /android\.intent\.category\.HOME/ && item != "" { print item; exit }')
     if [ -n "$pref" ]; then echo "$pref"; return 0; fi
-    sh_ 'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0' \
-        | tr -d '\r' | tail -1
+    res=$(dev 'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0') \
+        || return 1
+    printf '%s\n' "$res" | tail -1
 }
 
 connect() {
@@ -257,28 +314,37 @@ connect() {
 check_serial() {
     want=${EXPECT_SERIAL:-$(cat "$BACKUP_DIR/serial.txt" 2>/dev/null || true)}
     [ -n "$want" ] || return 0
-    got=$(sh_ getprop ro.serialno | tr -d '\r')
+    got=$(dev getprop ro.serialno) || die "could not read the serial number from $DEVICE"
     [ "$got" = "$want" ] \
         || die "$DEVICE reports serial '$got', expected '$want' (profile $PROFILE)"
 }
 
 cmd_info() {
     echo "profile: $PROFILE ($model)"
-    sh_ 'getprop ro.product.model; getprop ro.product.device; getprop ro.build.version.release; getprop ro.product.cpu.abilist; nproc'
-    echo "--- memory ---"; sh_ 'grep -E "MemTotal|MemAvailable" /proc/meminfo'
-    echo "--- disabled packages: "; sh_ 'pm list packages -d' | wc -l
+    for k in ro.product.model ro.product.device ro.build.version.release ro.product.cpu.abilist ro.build.fingerprint; do
+        v=$(dev getprop "$k") || die "could not read $k from $DEVICE"
+        printf '  %-26s %s\n' "$k" "$v"
+    done
+    v=$(dev 'nproc; grep -E "MemTotal|MemAvailable" /proc/meminfo') || die "could not read cpu and memory from $DEVICE"
+    printf '  %-26s %s\n' cpus "$(printf '%s\n' "$v" | head -1)"
+    printf '%s\n' "$v" | sed -n 's/^\(Mem[A-Za-z]*\): *\(.*\)/  \1                   \2/p'
+    list=$(pkg_list -d) || exit 1
+    printf '  %-26s %s\n' "disabled packages" "$(printf '%s\n' "$list" | sed '/^$/d' | wc -l | tr -d ' ')"
 }
 
 cmd_backup() {
+    list=$(pkg_list -d) || exit 1
     mkdir -p "$BACKUP_DIR"
-    stamp=$(sh_ date +%Y%m%d-%H%M%S | tr -d '\r')
-    f="$BACKUP_DIR/state-$stamp.txt"
-    {
-        echo "# disabled at backup time"
-        sh_ 'pm list packages -d' | sed 's/^package://' | tr -d '\r' | sort
-    } > "$f"
+    # The host's clock in UTC: the TV's may be wrong until it syncs, and its output is not trusted
+    # for file names.
+    f="$BACKUP_DIR/state-$(date -u +%Y%m%d-%H%M%S).txt"
+    { echo "# disabled at backup time"; printf '%s\n' "$list" | sed '/^$/d' | sort; } > "$f"
     ln -sf "$(basename "$f")" "$BACKUP_DIR/latest.txt"
-    [ -s "$BACKUP_DIR/serial.txt" ] || sh_ getprop ro.serialno | tr -d '\r' > "$BACKUP_DIR/serial.txt"
+    if [ ! -s "$BACKUP_DIR/serial.txt" ]; then
+        serial=$(dev getprop ro.serialno) || die "could not read the serial number from $DEVICE"
+        [ -n "$serial" ] || die "$DEVICE reports no serial number, so it cannot be told apart from another TV"
+        echo "$serial" > "$BACKUP_DIR/serial.txt"
+    fi
     echo "backup: $f ($(grep -vc '^#' "$f") already-disabled packages)"
 }
 
@@ -301,84 +367,141 @@ cmd_debloat() {
     prior="$BACKUP_DIR/$(readlink "$BACKUP_DIR/latest.txt")"
     applied="$BACKUP_DIR/applied.txt"
     touch "$applied"
+    off=$(pkg_list -d) || exit 1
     echo "tiers: $*"
-    ok=0; fail=0
+    ok=0; already=0; fail=0
     for p in $(tier_pkgs "$@"); do
-        if sh_ pm disable-user --user 0 "$p" >/dev/null 2>&1; then
+        # Already off, by this tool earlier or by the owner: nothing to do, and nothing to record.
+        if printf '%s\n' "$off" | grep -qxF -- "$p"; then
+            already=$((already + 1)); continue
+        fi
+        if out=$(sh_ pm disable-user --user 0 "$p" 2>&1); then
             ok=$((ok + 1)); echo "  disabled $p"
             # Record what this tool actually turned off. Restoring from this list rather than
             # from packages.conf keeps working after the config is edited, and never re-enables
             # something the user had already disabled themselves.
-            if ! grep -qx "$p" "$prior" && ! grep -qx "$p" "$applied"; then
+            if ! grep -qxF -- "$p" "$prior" && ! grep -qxF -- "$p" "$applied"; then
                 echo "$p" >> "$applied"
             fi
         else
-            fail=$((fail + 1)); echo "  FAILED   $p"
+            rc=$?; fail=$((fail + 1)); echo "  FAILED   $p: $(reason "$out" "$rc")" >&2
+            alive || die "lost the connection to $DEVICE; the $ok disabled so far are recorded — run debloat again when the TV is back"
         fi
     done
-    echo "disabled $ok, failed $fail (restore list: $applied)"
+    echo "disabled $ok, already off $already, failed $fail (restore list: $applied)"
+    [ "$fail" -eq 0 ]
+}
+
+# The original as recorded: shell-quoted since put_setting quotes it, a bare token in records
+# written before that, or null/empty for "was unset".
+restore_cmd() {
+    case $3 in
+        null|'') echo "settings delete $1 $2" ;;
+        \'*\') inner=${3#\'}; inner=${inner%\'}
+               case $(printf '%s' "$inner" | sed "s/'\\\\''//g") in *\'*) return 1 ;; esac
+               echo "settings put $1 $2 $3" ;;
+        *) is_tok "$3" || return 1; echo "settings put $1 $2 $(q "$3")" ;;
+    esac
 }
 
 cmd_restore() {
     applied="$BACKUP_DIR/applied.txt"
-    [ -s "$applied" ] || die "nothing to restore: $applied is missing or empty"
-    n=0
-    while read -r p; do
-        [ -n "$p" ] || continue
-        if sh_ pm enable --user 0 "$p" >/dev/null 2>&1; then
-            echo "  enabled $p"; n=$((n + 1))
-        else
-            echo "  FAILED  $p"
-        fi
-    done < "$applied"
-    echo "re-enabled $n of $(wc -l < "$applied" | tr -d ' ')"
-    # Drop the restore list so a later `verify` does not read it and report the packages we just
-    # re-enabled as drift. Done before the settings early-return so it runs even with no settings.
-    rm -f "$applied"
-
-    [ -s "$SETTINGS_FILE" ] || return 0
-    echo "restoring settings:"
-    while read -r ns key _ old; do
-        [ -n "$key" ] || continue
-        if [ "$old" = null ] || [ -z "$old" ]; then
-            sh_ settings delete "$ns" "$key" >/dev/null 2>&1 && echo "  unset    $key" || echo "  FAILED   $key"
-        else
-            sh_ settings put "$ns" "$key" "$old" >/dev/null 2>&1 && echo "  restored $key = $old" || echo "  FAILED   $key"
-        fi
-    done < "$SETTINGS_FILE"
-    rm -f "$SETTINGS_FILE"
+    [ -s "$applied" ] || [ -s "$SETTINGS_FILE" ] \
+        || die "nothing to restore: no packages or settings recorded in $BACKUP_DIR"
+    gone=; left=0
+    # Each list is rewritten with only what could not be undone, so a re-run picks up where this one
+    # stopped and verify can still see it; a list goes only once it is empty.
+    if [ -s "$applied" ]; then
+        n=0; : > "$applied.left"
+        while read -r p; do
+            [ -n "$p" ] || continue
+            if [ -z "$gone" ]; then
+                if out=$(sh_ pm enable --user 0 "$p" 2>&1); then
+                    echo "  enabled $p"; n=$((n + 1)); continue
+                else
+                    rc=$?
+                    if alive; then echo "  FAILED  $p: $(reason "$out" "$rc")" >&2; else gone=1; fi
+                fi
+            fi
+            echo "$p" >> "$applied.left"
+        done < "$applied"
+        k=$(grep -c . "$applied.left" || true)
+        echo "re-enabled $n of $((n + k))"
+        if [ "$k" -gt 0 ]; then mv "$applied.left" "$applied"; left=$((left + k)); else rm -f "$applied" "$applied.left"; fi
+    fi
+    if [ -s "$SETTINGS_FILE" ]; then
+        echo "restoring settings:"
+        : > "$SETTINGS_FILE.left"
+        while read -r ns key val old; do
+            [ -n "$key" ] || continue
+            if [ -z "$gone" ]; then
+                if ! c=$(restore_cmd "$ns" "$key" "$old"); then
+                    echo "  FAILED   $key: the recorded original is not a value it can send back: $old" >&2
+                elif out=$(sh_ "$c" 2>&1); then
+                    case $old in null|'') echo "  unset    $key" ;; *) echo "  restored $key = $old" ;; esac
+                    continue
+                else
+                    rc=$?
+                    if alive; then echo "  FAILED   $key: $(reason "$out" "$rc")" >&2; else gone=1; fi
+                fi
+            fi
+            echo "$ns $key $val $old" >> "$SETTINGS_FILE.left"
+        done < "$SETTINGS_FILE"
+        k=$(grep -c . "$SETTINGS_FILE.left" || true)
+        if [ "$k" -gt 0 ]; then mv "$SETTINGS_FILE.left" "$SETTINGS_FILE"; left=$((left + k)); else rm -f "$SETTINGS_FILE" "$SETTINGS_FILE.left"; fi
+    fi
+    [ -z "$gone" ] || die "lost the connection to $DEVICE; $left entries are still recorded — run restore again when the TV is back"
+    if [ "$left" -gt 0 ]; then
+        echo "error: $left entries could not be restored and are still recorded; fix the cause above and run restore again" >&2
+        return 1
+    fi
 }
 
 cmd_tune() {
-    printf '%s\n' "$SETTINGS" | while read -r ns key value _; do
+    fail=0
+    # Fed by redirect, not a pipe, so the failure count survives the loop.
+    while read -r ns key value _; do
         [ -n "$key" ] || continue
-        put_setting "$ns" "$key" "$value"
-    done
-    sh_ pm trim-caches 4G >/dev/null 2>&1 && echo "  caches trimmed" || echo "  trim-caches unavailable"
+        if ! put_setting "$ns" "$key" "$value"; then
+            fail=$((fail + 1))
+            alive || die "lost the connection to $DEVICE; the settings written so far are recorded"
+        fi
+    done <<EOF
+$SETTINGS
+EOF
+    if sh_ pm trim-caches 4G >/dev/null 2>&1; then echo "  caches trimmed"; else echo "  trim-caches unavailable"; fi
+    [ "$fail" -eq 0 ]
 }
 cmd_perf() { cmd_tune "$@"; }
 
 cmd_apps() {
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
+    fail=0
     # Fed by redirect, not a pipe: a checksum mismatch must abort the script, not a subshell.
     while IFS='|' read -r name url want; do
         [ -n "$name" ] || continue
         if [ "$url" = play ]; then
-            sh_ am start -a android.intent.action.VIEW -d "market://details?id=$name" >/dev/null 2>&1 \
-                && echo "  $name: Play Store listing opened on the TV — press Install with the remote" \
-                || echo "  FAILED to open the Play Store for $name"
+            if sh_ am start -a android.intent.action.VIEW -d "$(q "market://details?id=$name")" >/dev/null 2>&1; then
+                echo "  $name: Play Store listing opened on the TV — press Install with the remote"
+            else
+                echo "  FAILED   $name: could not open the Play Store" >&2; fail=$((fail + 1))
+            fi
             continue
         fi
         echo "  fetching $name"
         curl -fsSL -o "$tmp/$name.apk" "$url" || die "download failed: $name"
         got=$(sha256 "$tmp/$name.apk")
         [ "$got" = "$want" ] || die "checksum mismatch for $name — refusing to install"
-        "$ADB" -s "$DEVICE" install -r "$tmp/$name.apk" >/dev/null 2>&1 </dev/null \
-            && echo "  installed $name" || echo "  FAILED to install $name"
+        if out=$(timed 900 "$ADB" -s "$DEVICE" install -r "$tmp/$name.apk" 2>&1 </dev/null); then
+            echo "  installed $name"
+        else
+            rc=$?; echo "  FAILED   $name: $(reason "$out" "$rc" 900)" >&2; fail=$((fail + 1))
+        fi
     done <<EOF
 $APPS
 EOF
+    [ "$fail" -eq 0 ]
 }
 
 cmd_verify() {
@@ -386,19 +509,19 @@ cmd_verify() {
     echo "--- device props ---"
     for kv in $props; do
         k=${kv%%=*}; want=${kv#*=}
-        v=$(sh_ getprop "$k" | tr -d '\r')
+        v=$(dev getprop "$k") || die "could not read $k from $DEVICE"
         if [ "$v" = "$want" ]; then echo "  ok   $k=$v"; else echo "  FAIL $k is '$v', expected '$want'"; rc=1; fi
     done
 
     echo "--- protected packages enabled ---"
-    disabled=$(sh_ 'pm list packages -d' | sed 's/^package://' | tr -d '\r')
+    disabled=$(pkg_list -d) || exit 1
     bad=0
     for p in $PROTECTED; do
-        if printf '%s\n' "$disabled" | grep -qx "$p"; then
+        if printf '%s\n' "$disabled" | grep -qxF -- "$p"; then
             echo "  FAIL $p is disabled"; bad=$((bad + 1)); rc=1
         fi
     done
-    got=$(sh_ getprop ro.product.device | tr -d '\r')
+    got=$(dev getprop ro.product.device) || die "could not read ro.product.device from $DEVICE"
     if [ "$got" != "$device" ]; then
         echo "  WARN device is '$got', profile $PROFILE was built for '$device' — review it first"
     fi
@@ -409,20 +532,22 @@ cmd_verify() {
     echo "--- packages this tool disabled are still disabled ---"
     applied="$BACKUP_DIR/applied.txt"
     if [ -s "$applied" ]; then
-        back=0
+        back=
         while read -r p; do
             [ -n "$p" ] || continue
-            if ! printf '%s\n' "$disabled" | grep -qx "$p"; then
-                echo "  FAIL $p was re-enabled"; back=$((back + 1)); rc=1
+            if ! printf '%s\n' "$disabled" | grep -qxF -- "$p"; then
+                echo "  FAIL $p was re-enabled"; back="$back $p"; rc=1
             fi
         done < "$applied"
-        if [ "$back" -eq 0 ]; then
-            echo "  ok   all $(wc -l < "$applied" | tr -d ' ') still disabled"
+        if [ -z "$back" ]; then
+            echo "  ok   all $(grep -c . "$applied") still disabled"
         else
-            echo "  $back re-enabled — re-run: $(basename "$0") debloat"
+            # Name the tiers: vizzini, say, sits in the opt-in alexa tier, which plain `debloat` skips.
+            again=$(for p in $back; do conf_lines "$CONF" | awk -v p="$p" '$2 == p {print $1; exit}'; done | sort -u | tr '\n' ' ')
+            echo "  re-run: $0 debloat ${again% }"
         fi
     else
-        echo "  skip no applied.txt yet"
+        echo "  --   nothing recorded: debloat has not run on this TV, or restore cleared it"
     fi
 
     echo "--- settings still applied ---"
@@ -430,33 +555,38 @@ cmd_verify() {
         drift=0
         while read -r ns key want _; do
             [ -n "$key" ] || continue
-            got=$(sh_ settings get "$ns" "$key" | tr -d '\r')
+            got=$(dev settings get "$ns" "$key") || die "could not read $ns $key from $DEVICE"
             if [ "$got" != "$want" ]; then
-                echo "  FAIL $key is '$got', expected '$want'"; drift=$((drift + 1)); rc=1
+                case $key in
+                    private_dns_*) again="$0 dns" ;;
+                    screen_off_timeout|sleep_timeout) again="$0 sleep" ;;
+                    *) again="$0 tune" ;;
+                esac
+                echo "  FAIL $key is '$got', expected '$want' — re-run: $again"; drift=$((drift + 1)); rc=1
             fi
         done < "$SETTINGS_FILE"
         if [ "$drift" -eq 0 ]; then
-            echo "  ok   all $(wc -l < "$SETTINGS_FILE" | tr -d ' ') settings hold"
+            echo "  ok   all $(grep -c . "$SETTINGS_FILE") settings hold"
         fi
     else
-        echo "  skip no settings recorded yet"
+        echo "  --   nothing recorded: tune, dns and sleep have not run on this TV, or restore cleared it"
     fi
 
     echo "--- sideloaded apps present ---"
-    installed=$(sh_ 'pm list packages -3' | sed 's/^package://' | tr -d '\r')
+    installed=$(pkg_list -3) || exit 1
     while IFS='|' read -r pkg _ _; do
         [ -n "$pkg" ] || continue
-        if printf '%s\n' "$installed" | grep -qx "$pkg"; then
+        if printf '%s\n' "$installed" | grep -qxF -- "$pkg"; then
             echo "  ok   $pkg"
         else
-            echo "  --   $pkg not installed (run: $(basename "$0") apps)"
+            echo "  --   $pkg not installed (run: $0 apps)"
         fi
     done <<EOF
 $APPS
 EOF
 
     echo "--- home screen resolves ---"
-    home=$(home_activity)
+    home=$(home_activity) || die "could not read the launcher from $DEVICE"
     ok=0
     for l in $launcher; do
         case "$home" in "$l"/*) ok=1 ;; esac
@@ -471,7 +601,8 @@ EOF
         echo "--- launching media apps (takes over the TV) ---"
         present=''
         for p in $MEDIA_APPS; do
-            if sh_ "pm list packages $p" | grep -q "package:$p"; then present="$present $p"; fi
+            list=$(pkg_list "$p") || exit 1
+            if printf '%s\n' "$list" | grep -qxF -- "$p"; then present="$present $p"; fi
         done
         if [ -z "$present" ]; then echo "  --   none of the known media apps are installed"; fi
         for p in $present; do
@@ -485,7 +616,7 @@ EOF
     return $rc
 }
 
-cmd_status() { sh_ 'pm list packages -d' | sed 's/^package://' | tr -d '\r' | sort; }
+cmd_status() { list=$(pkg_list -d) || exit 1; printf '%s\n' "$list" | sed '/^$/d' | sort; }
 
 # Two independent timers: screen_off_timeout blanks the display, sleep_timeout suspends the
 # device. Setting only one leaves the other to cut in first.
