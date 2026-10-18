@@ -352,6 +352,27 @@ t "... and with --new-device keeps its own record" "disabled 1" \
 t "... while the first TV can still be restored" "0 3" \
   "$(if both a restore >/dev/null 2>&1; then echo 0; else echo $?; fi) $(setting a secure location_mode)"
 
+# The Sharp profile end to end: a model name with spaces, its own launcher and keep list.
+tv sharp sharp-4k-googletv
+cat > "$T/tv-sharp/props" <<PROPS
+ro.product.model=SHARP 4K UHDTV
+ro.product.device=maniatika
+ro.serialno=FAKESHARP01
+ro.build.version.release=14
+ro.build.fingerprint=SHARP/maniatika/maniatika:14/UTT1.0/0000:user/release-keys
+init.svc.drm=running
+init.svc.mediadrm=running
+PROPS
+echo com.google.android.apps.tv.launcherx/.home.HomeActivity > "$T/tv-sharp/stock_home"
+cp "$T/tv-sharp/stock_home" "$T/tv-sharp/home_candidates"
+: > "$T/tv-sharp/protected"; before=$(disabled sharp)
+t "sharp: the profile is found by its model name" 0 "$(rc sharp verify)"
+t "sharp: debloat and tune" "0 0" "$(rc sharp debloat) $(rc sharp tune)"
+t "sharp: Prime Video goes with promo, Netflix stays" "disabled enabled" \
+  "$(grep -qx com.amazon.amazonvideo.livingroom "$T/tv-sharp/disabled" && echo disabled) $(grep -qx com.netflix.ninja "$T/tv-sharp/disabled" && echo disabled || echo enabled)"
+t "sharp: verify passes afterwards" 0 "$(rc sharp verify)"
+t "sharp: restore brings it all back" "0 $before" "$(rc sharp restore) $(disabled sharp)"
+
 # show reads plainly.
 tv show
 t "sleep show says when a timer is not set" "yes" \

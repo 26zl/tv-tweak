@@ -117,9 +117,9 @@ devices/<profile>/
 
 Adding a device is adding a directory. Start from `pm list packages` on the device, put the
 launcher, input stack, DRM services and every streaming app in `keep.conf`, and grow
-`packages.conf` from what `dumpsys meminfo` and `dumpsys package` tell you. `test.sh` checks that
-every profile parses, names a launcher, has all of its default tiers, and never lists a kept
-package.
+`packages.conf` from what `dumpsys meminfo` and `dumpsys package` tell you; [CONTRIBUTING.md](CONTRIBUTING.md)
+has the steps. `test.sh` checks that every profile parses, names a launcher, has all of its default
+tiers, and never lists a kept package; `test-flows.sh` runs every command against a simulated TV.
 
 ## Safety
 

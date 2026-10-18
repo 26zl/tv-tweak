@@ -10,11 +10,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The macOS runner has no shellcheck, and linting the same files twice would report the
-      # same thing. macOS is here for the BSD userland, not for sha256 coverage: that runner
-      # ships sha256sum too, so test.sh checks both implementations directly instead.
+        with:
+          persist-credentials: false
+      # shellcheck runs once, on ubuntu: the macOS runner does not ship it and the result would be
+      # the same. macOS is here for its BSD userland and its /bin/sh.
       - name: shellcheck
         if: matrix.os == 'ubuntu-latest'
         run: shellcheck tweak.sh test.sh test-flows.sh
