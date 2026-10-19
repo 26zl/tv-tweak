@@ -63,12 +63,23 @@ belong to the stock one. `apps` opens the Play listing for Projectivy Launcher â
 itself needs the remote â€” and then:
 
 ```sh
-./tweak.sh home com.spocky.projengmenu              # make it the home screen
+./tweak.sh home com.spocky.projengmenu              # make it the preferred home screen
 ./tweak.sh home com.google.android.apps.tv.launcherx  # put the stock one back
 ```
 
-`verify` accepts either as a working home screen. The stock launcher stays enabled (it is in
-`keep.conf`); it hosts system pieces beyond the home screen.
+`home` sets Android's preferred launcher, which Android follows only among launchers of equal HOME
+priority; `set-home-activity` prints Success either way. So `home` then says where the Home button
+actually goes, and `verify` checks that rather than the preference. If it is still the stock
+launcher, Projectivy's own setting *Override current launcher* is what takes the button over.
+`verify` accepts either launcher as a working home screen.
+
+The stock launcher stays enabled (it is in `keep.conf`); it hosts system pieces beyond the home
+screen. So does the setup wizard, `com.google.android.tungsten.setupwraith`, which also answers
+Home. Guides that free Home for another launcher disable both, and on other Google TV 14 sets
+[cleanyourtv](https://github.com/Gathin23/cleanyourtv/tree/main/examples) recorded what followed:
+the Wi-Fi network saved during setup belongs to the wizard and was deleted with it (Sony BRAVIA 9
+II), and with the stock launcher gone the wizard's recovery screen took Home and crash-looped the
+system (Xiaomi TV A Pro 2026).
 
 ## Privacy settings that only exist in the UI
 

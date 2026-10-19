@@ -76,6 +76,15 @@ anything, and re-run `debloat alexa` when it reports drift. The other 47 package
 There is no public root for this device: the MediaTek bootrom path used by `amonet`/`kamakiri` is
 closed on MT8696.
 
+## Launcher
+
+Fire OS keeps its own home screen. `com.amazon.tv.launcher` is in `keep.conf`, and Fire OS
+accepts `set-home-activity` but ignores it, as [Fire TV
+Glass](https://github.com/ivantrj/firetv-glass-launcher) found on this model (on Fire OS 7 sets,
+[cleanyourtv](https://github.com/Gathin23/cleanyourtv/tree/main/examples) found Amazon's launcher
+declaring HOME at priority 950). `home` says so when you try it; launchers that take over on Fire
+TV do it with an accessibility service of their own.
+
 ## Sideloaded apps
 
 All `armeabi-v7a` — **this device is 32-bit** and rejects `arm64-v8a`.

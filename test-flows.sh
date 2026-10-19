@@ -27,11 +27,12 @@ if [ "$1" = -s ]; then shift 2; fi
 case $1 in
     devices) echo 'List of devices attached'; [ -e "$S/unplugged" ] || printf '127.0.0.1:5555\tdevice\n' ;;
     mdns|disconnect) ;;
-    connect) echo "already connected to $2" ;;
+    # no_route: what macOS answers a program it keeps off the local network.
+    connect) if [ -e "$S/no_route" ]; then echo "failed to connect to '$2': No route to host"; else echo "already connected to $2"; fi ;;
     shell)
         shift
         n=$(( $(cat "$S/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/calls"
-        if [ -e "$S/unplugged" ] || [ "$(cat "$S/settings/global/adb_enabled" 2>/dev/null)" = 0 ] \
+        if [ -e "$S/unplugged" ] || [ -e "$S/no_route" ] || [ "$(cat "$S/settings/global/adb_enabled" 2>/dev/null)" = 0 ] \
             || { [ -e "$S/offline_after" ] && [ "$n" -gt "$(cat "$S/offline_after")" ]; }; then
             echo "error: device '127.0.0.1:5555' not found" >&2; exit 1
         fi
@@ -110,8 +111,10 @@ cat > "$T/dev/cmd" <<'EOF'
 #!/bin/sh
 S=$FAKE_TV
 case $2 in
+    # The stock launcher's higher HOME priority wins over a preference, as on Fire OS and Google TV,
+    # unless home_follows says this TV's launchers tie.
     resolve-activity) echo 'priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false'
-                      cat "$S/stock_home" ;;
+                      if [ -e "$S/home_follows" ] && [ -s "$S/home" ]; then cat "$S/home"; else cat "$S/stock_home"; fi ;;
     query-activities) cat "$S/home_candidates" ;;
     set-home-activity) echo "$3" > "$S/home"; echo Success ;;
     *) exit 1 ;;
@@ -173,11 +176,14 @@ PROPS
     echo com.amazon.tv.launcher/.ui.HomeActivity_vNext > "$S/stock_home"
     cp "$S/stock_home" "$S/home_candidates"
 }
-# run <tv> <args...>: tweak.sh against that TV, with its own state directory.
+# run <tv> <args...>: tweak.sh against that TV, with its own state directory; `TWEAK_SH=<script> run`
+# uses another script for that call. macOS's /bin/sh keeps an assignment made in front of a function
+# call after it returns, and every later test ran the scratch copy, so run clears TWEAK_SH.
 run() {
     s=$1; shift
+    script=${TWEAK_SH:-$ROOT/tweak.sh}; unset TWEAK_SH
     FAKE_TV=$T/tv-$s FAKE_DEV=$T/dev ADB=$T/bin/adb DEVICE=127.0.0.1:5555 \
-        TWEAK_STATE=$T/state-$s sh "${TWEAK_SH:-$ROOT/tweak.sh}" "$@"
+        TWEAK_STATE=$T/state-$s sh "$script" "$@"
 }
 # copy <name>: a scratch checkout to edit profiles in; use it with TWEAK_SH=$T/<name>/tweak.sh.
 copy() { rm -rf "${T:?}/$1"; mkdir "$T/$1"; cp "$ROOT/tweak.sh" "$T/$1/"; cp -R "$ROOT/devices" "$T/$1/"; }
@@ -213,6 +219,10 @@ t "an auto-detected device is named" "using 127.0.0.1:5555 (the only device adb 
 
 tv gone; touch "$T/tv-gone/unplugged"
 t "no device is an error" 1 "$(rc gone verify)"
+tv nr; touch "$T/tv-nr/no_route"
+case $(uname -s) in Darwin) want="Local Network privacy" ;; *) want="no shell on" ;; esac
+t "a TV adb cannot reach says why, Local Network privacy on macOS" "yes" \
+  "$(run nr verify 2>&1 | grep -q "$want" && echo yes || echo no)"
 
 # Asking for help, or making a typo, never reaches the TV.
 tv args
@@ -467,7 +477,8 @@ copy ap; A=$T/ap/devices/firetv-stick-4k-max-2023/apps.conf
 } > "$A"
 printf '%s %s\n' https://example.com/a.apk com.example.a https://example.com/opt.apk com.example.opt \
     https://example.com/bad.apk com.example.bad https://f-droid.org/archive/fd.apk com.example.fd > "$T/curlmap"
-apps() { FAKE_CURL_MAP=$T/curlmap PATH=$T/curlbin:$PATH TWEAK_SH=$T/ap/tweak.sh run ap "$@"; }
+# A subshell, so the fake curl on PATH stays with these calls on macOS too.
+apps() ( FAKE_CURL_MAP=$T/curlmap PATH=$T/curlbin:$PATH TWEAK_SH=$T/ap/tweak.sh run ap "$@" )
 tv ap
 t "apps exits 1 when one app fails its checksum" 1 "$(if apps apps >/dev/null 2>&1; then echo 0; else echo $?; fi)"
 t "... but installs the rest, F-Droid from archive/, and skips optional ones" "com.example.a com.example.fd" \
@@ -487,8 +498,21 @@ t "restore --apps removes everything apps added" "0 none" \
 tv hm; echo com.example.launcher/.Home >> "$T/tv-hm/home_candidates"; echo com.example.launcher >> "$T/tv-hm/installed"
 run hm debloat >/dev/null 2>&1; run hm home com.example.launcher >/dev/null 2>&1
 t "home changes the launcher" "com.example.launcher/.Home" "$(cat "$T/tv-hm/home")"
+# set-home-activity prints Success even where a higher-priority stock launcher keeps the Home button.
+t "home says when Home still goes to the stock launcher" "yes" \
+  "$(run hm home com.example.launcher 2>&1 | grep -q 'Home still goes to com.amazon.tv.launcher/' && echo yes || echo no)"
+t "verify checks where Home goes, and names the setting it ignores" "0 yes yes" \
+  "$(rc hm verify) $(run hm verify | grep -q '^  ok   com.amazon.tv.launcher/' && echo yes) $(run hm verify | grep -q 'WARN com.example.launcher is set as home' && echo yes)"
+t "home show prints where Home goes, and the setting Android ignores" "yes yes" \
+  "$(run hm home show 2>/dev/null | grep -qx 'com.amazon.tv.launcher/.ui.HomeActivity_vNext' && echo yes) $(run hm home show 2>&1 >/dev/null | grep -q 'com.example.launcher is set as home' && echo yes)"
 run hm restore >/dev/null 2>&1
 t "restore puts the previous launcher back" "com.amazon.tv.launcher/.ui.HomeActivity_vNext" "$(cat "$T/tv-hm/home")"
+tv hf; touch "$T/tv-hf/home_follows"; echo com.example.launcher/.Home >> "$T/tv-hf/home_candidates"; echo com.example.launcher >> "$T/tv-hf/installed"
+t "home has nothing to add where Android follows it" "0 no" \
+  "$(rc hf home com.example.launcher) $(run hf home com.example.launcher 2>&1 | grep -q 'Home still goes' && echo yes || echo no)"
+# The preference names an accepted launcher, but Home lands elsewhere, as when a setup wizard takes it.
+tv hx; echo com.amazon.tv.launcher/.ui.HomeActivity_vNext > "$T/tv-hx/home"; echo com.example.setupwizard/.RecoveryActivity > "$T/tv-hx/stock_home"
+t "verify fails when Home goes elsewhere than the launcher set" 1 "$(rc hx verify)"
 
 # Started through a symlink, as from ~/bin, it still finds its profiles.
 copy ln; mkdir -p "$T/lnbin"; ln -s "$T/ln/tweak.sh" "$T/lnbin/tweak"
