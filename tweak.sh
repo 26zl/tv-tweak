@@ -259,7 +259,7 @@ put_setting() {
     fi
 }
 
-# macOS ships shasum but not sha256sum; most Linux distributions ship the reverse.
+# Older macOS releases ship shasum but not sha256sum; most Linux distributions ship the reverse.
 sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | cut -d' ' -f1
@@ -292,17 +292,25 @@ tier_pkgs() {
     done
 }
 
-# A launcher set with `home` is a preferred activity, which `resolve-activity` ignores on Google
-# TV in favour of the stock launcher's higher priority, so read the preference first.
-home_activity() {
+# A launcher set with `home` is only a preferred activity. Android consults it among launchers of
+# equal HOME priority, so where the stock launcher declares a higher one, as on Google TV and Fire
+# OS, Home keeps going there although set-home-activity printed Success. home_pref is what was set,
+# home_resolved is where Home goes, and home_activity is the setting to record and put back.
+home_pref() {
     xml=$(dev dumpsys package preferred-xml) || return 1
-    pref=$(printf '%s\n' "$xml" | awk '
+    printf '%s\n' "$xml" | awk '
         /<item name="/ { sub(/.*<item name="/, ""); sub(/".*/, ""); item = $0 }
-        /android\.intent\.category\.HOME/ && item != "" { print item; exit }')
-    if [ -n "$pref" ]; then echo "$pref"; return 0; fi
+        /android\.intent\.category\.HOME/ && item != "" { print item; exit }'
+}
+home_resolved() {
     res=$(dev 'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0') \
         || return 1
     printf '%s\n' "$res" | tail -1
+}
+home_activity() {
+    pref=$(home_pref) || return 1
+    if [ -n "$pref" ]; then echo "$pref"; return 0; fi
+    home_resolved
 }
 
 connect() {
@@ -328,10 +336,18 @@ connect() {
     # already-connected, so the next `adb shell` fails. Tear it down and retry.
     i=0
     while :; do
-        "$ADB" connect "$DEVICE" >/dev/null 2>&1 || true
+        said=$("$ADB" connect "$DEVICE" 2>&1) || true
         sh_ true >/dev/null 2>&1 && break
         i=$((i + 1))
-        [ "$i" -lt 3 ] || die "no shell on $DEVICE after $i attempts — check ADB debugging, authorisation, and that the device is awake"
+        if [ "$i" -ge 3 ]; then
+            # macOS's Local Network privacy turns a program it has not allowed away with this same
+            # error, port open or not, and the adb server keeps the permission of the app that started it.
+            case $(uname -s):$said in
+                Darwin:*'No route to host'*)
+                    die "adb cannot reach $DEVICE: No route to host. If the TV is on, macOS's Local Network privacy is probably blocking adb: allow the app you run this from under System Settings > Privacy & Security > Local Network (Terminal needs nothing), then run '$ADB kill-server' and try again; the adb server keeps the permission of the app that started it, Android Studio for one" ;;
+            esac
+            die "no shell on $DEVICE after $i attempts — check ADB debugging, authorisation, and that the device is awake"
+        fi
         "$ADB" disconnect "$DEVICE" >/dev/null 2>&1 || true
         sleep 2
     done
@@ -795,8 +811,11 @@ cmd_verify() {
 $APPS
 EOF
 
+    # Where Home goes, not what was set: a preference that Android ignores once let this print "ok"
+    # for a launcher the Home button never reached.
     echo "--- home screen resolves ---"
-    home=$(home_activity) || die "could not read the launcher from $DEVICE"
+    home=$(home_resolved) || die "could not read the launcher from $DEVICE"
+    pref=$(home_pref) || die "could not read the preferred launcher from $DEVICE"
     ok=0
     for l in $launcher; do
         case "$home" in "$l"/*) ok=1 ;; esac
@@ -806,6 +825,10 @@ EOF
     else
         echo "  FAIL home is '${home:-none}', expected one of: $launcher"; rc=1
     fi
+    case $pref in
+        ''|"${home%%/*}"/*) ;;
+        *) echo "  WARN ${pref%%/*} is set as home, but Home goes to ${home%%/*}" ;;
+    esac
 
     if [ -n "$DEEP" ]; then
         echo "--- launching media apps (takes over the TV) ---"
@@ -880,7 +903,14 @@ cmd_dns() {
 # Google TV has no menu for changing the launcher; the package manager does it without root.
 cmd_home() {
     case "${1:-show}" in
-        show) home_activity || die "could not read the launcher from $DEVICE" ;;
+        show)
+            now=$(home_resolved) || die "could not read the launcher from $DEVICE"
+            pref=$(home_pref) || die "could not read the preferred launcher from $DEVICE"
+            echo "$now"
+            case $pref in
+                ''|"${now%%/*}"/*) ;;
+                *) echo "note: ${pref%%/*} is set as home, but Android sends Home to the launcher above" >&2 ;;
+            esac ;;
         *)
             is_pkg "$1" || die "not a package name: '$1'"
             list=$(dev 'cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0') \
@@ -896,6 +926,12 @@ cmd_home() {
             fi
             sh_ cmd package set-home-activity "$comp" --user 0 >/dev/null 2>&1 || die "could not set $comp as home"
             echo "home = $comp"
+            # set-home-activity prints Success either way, so ask where Home goes now.
+            now=$(home_resolved) || die "could not read the launcher from $DEVICE"
+            case $now in
+                "$1"/*) ;;
+                *) echo "note: Home still goes to ${now:-nothing}; Android ignores this setting while a launcher with a higher HOME priority is enabled. Some launchers take the Home button over themselves: see the device README" >&2 ;;
+            esac
             ;;
     esac
 }

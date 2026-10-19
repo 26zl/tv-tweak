@@ -64,6 +64,12 @@ changes.
   still read.
 - A `settings.conf` line with a fourth column belongs to that tier and is applied by
   `debloat <tier>`. The `ota` tier is opt-in because it stops security updates.
+- `home` sets a preferred activity, which Android ignores while a launcher with a higher HOME
+  priority is enabled (Fire OS, Google TV); `set-home-activity` prints Success either way.
+  `home_resolved` is where Home goes and what `verify` checks; `home_activity` is what `restore`
+  records and puts back.
+- macOS's Local Network privacy turns away a program it has not allowed with "No route to host",
+  and the adb server keeps the permission of the app that started it.
 
 ## Pitfalls
 

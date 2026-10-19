@@ -4,6 +4,27 @@
 
 ## Unreleased
 
+### Changed — check these when you update
+
+- `home show` prints where the Home button goes, as Android resolves it, and names a launcher set
+  with `home` that Android ignores; it used to print the setting.
+- `sharp-4k-googletv` keeps Google TV's setup wizard, `com.google.android.tungsten.setupwraith`,
+  enabled whatever `packages.conf` says: on other Google TV 14 sets, disabling it lost the Wi-Fi
+  network saved during setup, or left Home crash-looping on its recovery screen.
+
+### Added
+
+- `home` says when the Home button still goes to another launcher; `set-home-activity` prints
+  Success even when Android ignores it.
+- On macOS, "No route to host" from adb comes with what it usually means there, Local Network
+  privacy, and how to let adb through.
+
+### Fixed
+
+- `verify` checked the launcher set with `home` instead of where the Home button goes. On Fire OS
+  and Google TV, whose stock launchers outrank that setting, it could pass a launcher the button
+  never reached, or miss Home landing on one it does not accept.
+
 ## 0.1.0 — 2026-10-19
 
 The first version with a number. Earlier states of `main` were unversioned.

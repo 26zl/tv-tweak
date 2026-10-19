@@ -30,7 +30,8 @@ the steps. Android Studio installs `platform-tools` without putting it on `PATH`
 SDK locations are checked as a fallback; set `ADB=/path/to/adb` if yours lives somewhere else.
 
 macOS and Linux both work, and CI runs the checks on both. The device is reached over TCP, so
-Linux needs no udev rules.
+Linux needs no udev rules; on macOS, Local Network privacy can keep adb off the network (see
+[Troubleshooting](#troubleshooting)).
 
 The profile is picked by matching `ro.product.model` against `devices/*/device.conf`; pass
 `--device <profile>` to choose explicitly. Commands that change the TV refuse one whose
@@ -176,6 +177,12 @@ set up on your DNS resolver.
 
 - **"no device" / "several devices found"**: set `DEVICE=<ip>:<port>`; `adb devices` and
   `adb mdns services` show what adb sees.
+- **"adb cannot reach … No route to host" on macOS**: macOS's Local Network privacy keeps a
+  program off the local network until it is allowed in, and answers with this error instead of a
+  prompt. Allow the app you run `tweak.sh` from (iTerm2, VS Code and the like; Terminal needs
+  nothing) under System Settings → Privacy & Security → Local Network, then run `adb kill-server`
+  and try again: the adb server keeps the permission of whichever app started it, Android Studio
+  for one. The same block hides the TV from adb's mDNS discovery, so "no device" can be this too.
 - **"this TV (serial …) is new to profile …"**: `DEVICE` points at a TV the profile has not
   changed before. Fix `DEVICE`, or add `--new-device` once for a second TV of the same model.
 - **"this TV is '…', but profile … was built for '…'"**: the profile is for another device. Compare
@@ -186,6 +193,12 @@ set up on your DNS resolver.
   `./tweak.sh debloat alexa`.
 - **A command stops with "no answer within 60s"**: the TV went to sleep or dropped off the
   network. Wake it and run the command again; what was done so far is recorded.
+- **`apps` waits at an install, or stops with "no answer within 900s"**: look at the TV. Android
+  may be waiting for you to confirm the install, as Play Protect does for sideloaded apps; answer
+  with the remote and run `apps` again, which skips what is already installed.
+- **`home` says "Home still goes to …"**: `home` sets a preference, which Android ignores while a
+  launcher with a higher HOME priority is enabled, as the stock ones on Fire OS and Google TV are.
+  The device README says what takes the Home button over there.
 
 ## Layout
 
