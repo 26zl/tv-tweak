@@ -1,0 +1,25 @@
+name: pins
+# Compares the apps.conf pins with what each project publishes: weekly, and whenever they change.
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+  push:
+    paths: ['devices/*/apps.conf', 'check-pins.sh']
+  pull_request:
+    paths: ['devices/*/apps.conf', 'check-pins.sh']
+permissions:
+  contents: read
+
+jobs:
+  pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: compare pins with upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./check-pins.sh

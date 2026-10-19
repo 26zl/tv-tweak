@@ -3,13 +3,13 @@
 [![ci](https://github.com/26zl/tv-tweak/actions/workflows/ci.yml/badge.svg)](https://github.com/26zl/tv-tweak/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Debloat and tune Android TV devices over ADB. No root, fully reversible, keeps DRM playback
-working. One generic POSIX `sh` script; everything that depends on the device lives in a profile
-directory under `devices/`.
+Debloat and tune Fire TV and Google TV devices over ADB, without root. `restore` undoes what the
+tool changed, and the packages that playback and DRM depend on are never touched. One generic POSIX
+`sh` script; everything that depends on the device lives in a profile directory under `devices/`.
 
 | Profile | Device | Verified on |
 | --- | --- | --- |
-| [`firetv-stick-hd`](devices/firetv-stick-hd/README.md) | Amazon Fire TV Stick 4K Max (`karat` / `AFTKRT`) | Fire OS 8.1.8.0 |
+| [`firetv-stick-4k-max-2023`](devices/firetv-stick-4k-max-2023/README.md) | Amazon Fire TV Stick 4K Max (`karat` / `AFTKRT`) | Fire OS 8.1.8.0 |
 | [`sharp-4k-googletv`](devices/sharp-4k-googletv/README.md) | Sharp 4K UHDTV (MediaTek MT9676 / `maniatika`) | Google TV, Android 14 |
 
 Every package list was taken from `pm list packages` on the device it names. Generic Android TV
@@ -19,6 +19,12 @@ switcher. The logic is `pm disable-user` in a loop — the value is the curated 
 
 ## Setup
 
+```sh
+git clone https://github.com/26zl/tv-tweak.git && cd tv-tweak
+./tweak.sh --version
+git pull          # later, to update; CHANGELOG.md says what changed
+```
+
 Needs `adb` and `curl` on the host, and ADB debugging on the device — each profile's README has
 the steps. Android Studio installs `platform-tools` without putting it on `PATH`, so the standard
 SDK locations are checked as a fallback; set `ADB=/path/to/adb` if yours lives somewhere else.
@@ -27,7 +33,11 @@ macOS and Linux both work, and CI runs the checks on both. The device is reached
 Linux needs no udev rules.
 
 The profile is picked by matching `ro.product.model` against `devices/*/device.conf`; pass
-`--device <profile>` to choose explicitly. With exactly one device attached, or exactly one
+`--device <profile>` to choose explicitly. Commands that change the TV refuse one whose
+`ro.product.device` is not the profile's — another device's package list is how playback breaks —
+unless `--force` says you compared the two with `verify` first. A different Android release, or a
+firmware update since the TV's first backup, is reported as a warning. (`firetv-stick-hd` was the
+first name of the Fire TV profile; it still works and points at `firetv-stick-4k-max-2023`.) With exactly one device attached, or exactly one
 advertising Android's wireless debugging over mDNS, it is detected automatically:
 
 ```sh
@@ -37,36 +47,58 @@ export DEVICE=192.168.1.50:5555        # only if several devices are attached
 ## Usage
 
 ```text
-./tweak.sh [--device <profile>] <command>
+./tweak.sh [options] <command> [arguments]
 
-  info                 device summary
-  backup               snapshot which packages are already disabled; pins the device serial
-  debloat [tiers...]   disable packages (default tiers come from the profile)
-  restore              undo everything: packages and settings
-  tune                 apply the profile's settings.conf, trim caches
-  apps                 sideload the profile's apps.conf (checksum-pinned)
-  verify [--deep]      DRM props, protected packages, drift, launcher; --deep launches media apps
-  status               list currently disabled packages
-  launch <package>     start an app with no home-screen icon
-  home [package]       show or set the launcher
-  dns [host|off|show]  system-wide DNS-over-TLS
-  sleep <min|never>    display-off and device-sleep timers
+  info                  device summary
+  backup                snapshot which packages are already disabled (the first one is kept as the baseline)
+  debloat [tiers...]    disable packages (default tiers come from the profile)
+  restore [--apps]      undo this tool: its packages, settings and launcher; --apps also its sideloads
+  tune                  apply the profile's settings.conf, trim caches
+  apps [package...]     sideload the profile's apps.conf (checksum-pinned); optional ones by name
+  verify                DRM props, protected packages, drift, launcher
+  status                list currently disabled packages
+  launch <package>      start an app with no home-screen icon
+  home [package|show]   show or set the launcher
+  dns [host|off|auto|show]    Private DNS: a DNS-over-TLS hostname, off, or Android's default
+  sleep [minutes|never|show]  display-off and device-sleep timers
+  adb-off               turn off ADB debugging when you are done
+
+options, anywhere on the line:
+  --device <profile>    use devices/<profile> instead of matching the TV's model
+  --deep                verify: also launch each installed media app (takes over the TV)
+  --new-device          start a separate record for a second TV of the same model
+  --force               change a TV that is not the device its profile was built for
+  --dry-run             show what a command would change; nothing on the TV or in its state changes
+  -h, --help            usage; never touches the TV
+  --version             print the version
 ```
 
-First run — `verify` first, so you can tell a regression from a pre-existing fault:
+Arguments are checked before anything connects: an unknown tier, a hostname that Private DNS
+cannot use (an IP address, a name without a dot), or anything with shell syntax in it is refused
+with exit code 2.
+
+First run — `verify` first, so you can tell a regression from a pre-existing fault, and a dry run
+to see exactly what will change:
 
 ```sh
-./tweak.sh verify && ./tweak.sh backup && ./tweak.sh debloat && ./tweak.sh tune
+./tweak.sh verify
+./tweak.sh debloat --dry-run && ./tweak.sh tune --dry-run
+./tweak.sh backup && ./tweak.sh debloat && ./tweak.sh tune
 ./tweak.sh verify
 ```
 
-`debloat` appends everything it disables to `backups/<profile>/applied.txt` and every setting
-written goes to `backups/<profile>/settings.txt` with its original value. `restore` reverses
-exactly those, so it stays correct after you edit `packages.conf` and never touches what you had
-already disabled yourself.
+`debloat` appends everything it disables to `applied.txt` in the TV's state directory (see
+[Layout](#layout)), and every setting written goes to `settings.txt` with its original value,
+recorded before the write. `restore` reverses exactly those, so it stays correct after you edit `packages.conf` and
+never touches what you had already disabled yourself. Packages and settings are restored
+independently; whatever fails stays recorded and `restore` exits 1, so running it again finishes
+the job. A TV that stops answering ends the run instead of turning every remaining step into a
+failure, and each adb call gives up after `TWEAK_TIMEOUT` seconds (60 by default). A read that
+fails is an error, never an empty answer.
 
-`backup` also records `ro.serialno`; every later run refuses to touch a device with a different
-serial, which guards against DHCP handing the IP to something else. `EXPECT_SERIAL=` overrides it.
+State is kept per TV, keyed by its serial number (`ro.serialno`). A TV the profile has not been
+used on before is refused, which guards against DHCP handing the IP to another TV; for a second TV
+of the same model, add `--new-device` once and it gets its own record.
 
 Run `verify` after reboots and after installing anything: some firmware re-enables packages on
 its own, and `verify` reports exactly which ones drifted.
@@ -79,43 +111,119 @@ devices/<profile>/
   device.conf      model, device codename, default tiers, accepted launchers, props to verify
   packages.conf    tiered package list with rationale
   keep.conf        packages that are never disabled, whatever packages.conf says
-  apps.conf        sideload targets as <package>|<url>|<sha256>; `play` as url opens the store
+  apps.conf        sideload targets as <package>|<url>|<sha256>[|optional]; `play` as url opens the store
   settings.conf    <namespace> <key> <value> lines applied by `tune`
 ```
 
 Adding a device is adding a directory. Start from `pm list packages` on the device, put the
 launcher, input stack, DRM services and every streaming app in `keep.conf`, and grow
-`packages.conf` from what `dumpsys meminfo` and `dumpsys package` tell you. `test.sh` checks that
-every profile parses, names a launcher, has all of its default tiers, and never lists a kept
-package.
+`packages.conf` from what `dumpsys meminfo` and `dumpsys package` tell you; [CONTRIBUTING.md](CONTRIBUTING.md)
+has the steps. `test.sh` checks that every profile parses, names a launcher, has all of its default
+tiers, and never lists a kept package; `test-flows.sh` runs every command against a simulated TV.
 
 ## Safety
 
 `keep.conf` is enforced independently of `packages.conf`, so editing the package list cannot
-break playback. `verify` checks the DRM props named in `device.conf`, that nothing kept is
-disabled, that disabled packages stayed disabled, that settings held, that sideloads are present,
-and that the home screen resolves to an accepted launcher. `--deep` also launches each installed
-streaming app; it takes over the TV.
+break playback. The streaming apps named in `media_apps` are protected the same way. It fails
+closed: without a `keep.conf` that lists packages, or with a profile line it cannot read safely (a
+package name with shell syntax in it, a plain-http download, a missing checksum), nothing runs.
+Every profile file is read the same way, so CRLF endings, stray spaces and `# comments` after an
+entry are harmless; `device.conf` is read as data and never executed.
+
+`verify` checks the DRM props named in `device.conf`, that nothing kept is disabled, that disabled
+packages stayed disabled, that settings held, that sideloads are present, and that the home screen
+resolves to an accepted launcher. `--deep` also launches each installed streaming app; it takes
+over the TV.
+
+**Firmware updates stay on by default.** Each profile has an `ota` tier that disables the
+updaters it can, and on Fire TV sets `ota_disable_automatic_update`, but it is opt-in
+(`debloat ota`): it stops security fixes too, on a device that is always online. Updates can also
+add packages or bring back disabled ones, which is why `verify` warns when the firmware build
+changed since the TV's first backup. If you block updates, lift the block now and then (`restore`
+does), update, and run `debloat` and `verify` again.
+
+**Turn ADB off when you are done.** This tool needs ADB debugging, and ADB over TCP — port 5555
+especially, which is unencrypted and advertised over mDNS — lets anything on the network that gets
+past the authorisation prompt run commands on the TV. `./tweak.sh adb-off` turns it off (the tool
+cannot reach the TV afterwards); turn it back on under Developer options when you next need it.
 
 `verify` shows the DRM flags are advertised, not that a licence was fetched. Playback was confirmed
 by hand on each verified device after the full debloat and `tune`.
 
-`apps` downloads over HTTPS and aborts on a checksum mismatch; the pins are recorded in each
-`apps.conf` together with the date. Both verified devices are 32-bit (`armeabi-v7a`) and reject
+`apps` downloads over HTTPS only, redirects included, and refuses any APK whose checksum differs
+from the pin; each pin in `apps.conf` was checked against the digest its project publishes, on the
+date given. An app that is already installed is left alone, whatever its version, and entries
+marked `optional` are installed only when named. What `apps` installs is recorded, and
+`restore --apps` removes it. Both verified devices are 32-bit (`armeabi-v7a`) and reject
 `arm64-v8a`-only builds.
+
+## Undo and uninstall
+
+To return a TV to how it was and stop using the tool:
+
+1. `./tweak.sh restore --apps` re-enables what the tool disabled, rolls its settings back, puts
+   the previous launcher back and uninstalls what `apps` installed. It exits 1 if anything is left;
+   fix the cause it prints and run it again until it exits 0. `status` lists what is still
+   disabled.
+2. `./tweak.sh adb-off`, or turn off ADB and wireless debugging under Developer options.
+3. Only then delete the clone and the TV's state directory (see [Layout](#layout)): until `restore`
+   has finished, the state directory is the only record of what to undo.
+
+Not undone: caches trimmed by `tune`, apps installed by hand from the Play Store, and filtering
+set up on your DNS resolver.
+
+## Troubleshooting
+
+- **"no device" / "several devices found"**: set `DEVICE=<ip>:<port>`; `adb devices` and
+  `adb mdns services` show what adb sees.
+- **"this TV (serial …) is new to profile …"**: `DEVICE` points at a TV the profile has not
+  changed before. Fix `DEVICE`, or add `--new-device` once for a second TV of the same model.
+- **"this TV is '…', but profile … was built for '…'"**: the profile is for another device. Compare
+  with `./tweak.sh --device <profile> verify` before reaching for `--force`.
+- **"No internet" after `dns`**: the resolver was not reachable over DNS-over-TLS (port 853).
+  `./tweak.sh dns auto` returns to Android's default; see the device README.
+- **`verify` reports drift after a reboot or an update**: re-run the command it names, for example
+  `./tweak.sh debloat alexa`.
+- **A command stops with "no answer within 60s"**: the TV went to sleep or dropped off the
+  network. Wake it and run the command again; what was done so far is recorded.
 
 ## Layout
 
 ```text
 tweak.sh         the tool
 test.sh          self-test for the parsing logic and every profile; no device required
+test-flows.sh    every command end to end against a simulated TV; no device required
+check-pins.sh    compares the app pins with what each project publishes (run weekly by CI)
 devices/         one directory per device, see Profiles
-backups/<profile>/
-  state-*.txt    what was already disabled before the tool ran
-  applied.txt    what the tool disabled; the exact input to `restore`
-  settings.txt   every setting written, as `<namespace> <key> <applied> <original>`
-  serial.txt     the device this profile was first used on
 ```
+
+The undo record lives outside the clone, one directory per TV, so a re-clone or `git clean -fdx`
+cannot take it away: `~/.local/state/tv-tweak/<profile>/<serial>/` (or under `$XDG_STATE_HOME`),
+`~/Library/Application Support/tv-tweak/<profile>/<serial>/` on macOS, or `$TWEAK_STATE` if set.
+Every command that changes something prints the path.
+
+```text
+<profile>/<serial>/
+  baseline.txt     what was already disabled before the tool first ran; never rewritten
+  snapshot-*.txt   every later `backup`
+  applied.txt      what the tool disabled; the exact input to `restore`
+  settings.txt     every setting written, as `<namespace> <key> <applied> <original>`
+  build.txt        the firmware build the TV had at the first backup
+  log.txt          one line per run that changed something, in UTC
+```
+
+Keep it until you have run `restore`: it is the only record of what to undo. State from earlier
+versions, in `backups/<profile>/` inside the clone, moves there the first time its TV is connected.
+
+## Notices
+
+Use at your own risk. The tool changes system settings and disables preinstalled software on a
+device you own; it is provided as is, without warranty (see [LICENSE](LICENSE)). Apps installed by
+`apps` come from their publishers, under their own licences and terms.
+
+Not affiliated with or endorsed by Amazon, Google, Sharp or the publishers of the listed apps.
+Amazon, Fire TV and all related marks are trademarks of Amazon.com, Inc. or its affiliates. Android,
+Google TV and YouTube are trademarks of Google LLC. Other names belong to their owners.
 
 ## License
 
