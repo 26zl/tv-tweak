@@ -1,0 +1,11 @@
+# tv-verify.timer — tv-verify.service every morning, after the TVs have had their night of updates.
+[Unit]
+Description=tweak.sh verify daily
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

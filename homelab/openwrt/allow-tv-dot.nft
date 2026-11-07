@@ -1,0 +1,4 @@
+# Accepts DNS-over-TLS from the TVs ahead of the reject that https-dns-proxy adds for everyone, so
+# `tweak.sh dns` works for them while the rest of the LAN keeps the router's resolver. Replace the
+# addresses with the TVs' reservations; docs/homelab.md has the firewall include that loads it.
+ip saddr { 192.0.2.10, 192.0.2.11 } tcp dport 853 counter accept comment "tv private dns"

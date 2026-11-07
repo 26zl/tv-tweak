@@ -22,7 +22,7 @@ switcher. The logic is `pm disable-user` in a loop — the value is the curated 
 ```sh
 git clone https://github.com/26zl/tv-tweak.git && cd tv-tweak
 ./tweak.sh --version
-git pull          # later, to update; CHANGELOG.md says what changed
+git pull          # later, to update; git log says what changed
 ```
 
 Needs `adb` and `curl` on the host, and ADB debugging on the device — each profile's README has
@@ -158,6 +158,13 @@ marked `optional` are installed only when named. What `apps` installs is recorde
 `restore --apps` removes it. Both verified devices are 32-bit (`armeabi-v7a`) and reject
 `arm64-v8a`-only builds.
 
+## In a homelab
+
+The TV is one host among others: it needs a fixed address, a router that lets its Private DNS
+through, ADB that is off when nothing uses it, the right Home Assistant integration, and a
+`verify` that runs without you. [docs/homelab.md](docs/homelab.md) covers each, with the OpenWrt
+rule and a systemd timer in `homelab/`.
+
 ## Undo and uninstall
 
 To return a TV to how it was and stop using the tool:
@@ -208,6 +215,8 @@ test.sh          self-test for the parsing logic and every profile; no device re
 test-flows.sh    every command end to end against a simulated TV; no device required
 check-pins.sh    compares the app pins with what each project publishes (run weekly by CI)
 devices/         one directory per device, see Profiles
+docs/homelab.md  the network around the TV: Private DNS, ADB, Home Assistant, verify on a timer
+homelab/         tv-verify.sh with its systemd units, and the OpenWrt rule
 ```
 
 The undo record lives outside the clone, one directory per TV, so a re-clone or `git clean -fdx`

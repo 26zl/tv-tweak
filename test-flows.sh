@@ -530,5 +530,29 @@ tv semi; before=$(disabled semi)
 t "a ';' after a package name stops debloat" 1 "$(TWEAK_SH=$T/semi/tweak.sh rc semi debloat ads)"
 t "... before anything is disabled" "$before" "$(disabled semi)"
 
+# --- homelab/tv-verify.sh: verify for a timer, the report to a webhook ------------------------------
+mkdir -p "$T/hookbin"
+cat > "$T/hookbin/curl" <<'EOF'
+#!/bin/sh
+# Fake webhook: keeps the body it is handed on stdin.
+cat > "$FAKE_HOOK"
+EOF
+chmod +x "$T/hookbin/curl"
+# tvv <tv> <args...>: tv-verify.sh with that TV's fake adb and state; the webhook lands in $T/hook-<tv>.
+tvv() ( s=$1; shift; FAKE_TV=$T/tv-$s FAKE_DEV=$T/dev ADB=$T/bin/adb TWEAK_STATE=$T/state-$s FAKE_HOOK=$T/hook-$s \
+        PATH=$T/hookbin:$PATH WEBHOOK_URL=https://hook.example.invalid/x sh "$ROOT/homelab/tv-verify.sh" "$@" )
+rcv() { if tvv "$@" >/dev/null 2>&1; then echo 0; else echo $?; fi; }
+tv vf; run vf debloat >/dev/null 2>&1; run vf tune >/dev/null 2>&1
+t "tv-verify passes a TV without drift and posts nothing" "0 no" \
+  "$(rcv vf firetv-stick-4k-max-2023=127.0.0.1:5555) $([ -e "$T/hook-vf" ] && echo yes || echo no)"
+p=$(head -1 "$(state vf)/applied.txt"); grep -vx "$p" "$T/tv-vf/disabled" > "$T/tv-vf/disabled.new"; mv "$T/tv-vf/disabled.new" "$T/tv-vf/disabled"
+t "tv-verify fails on drift and posts the FAIL line as JSON" "1 yes yes" \
+  "$(rcv vf firetv-stick-4k-max-2023=127.0.0.1:5555) $(grep -q "$p was re-enabled" "$T/hook-vf" && echo yes || echo no) $(grep -q '^{"content": "tv-verify: 1 of 1 TVs failed' "$T/hook-vf" && echo yes || echo no)"
+tv vg; touch "$T/tv-vg/unplugged"
+t "tv-verify counts a TV that does not answer as failed" "1 yes" \
+  "$(rcv vg firetv-stick-4k-max-2023=127.0.0.1:5555) $(grep -q 'error: no shell' "$T/hook-vg" && echo yes || echo no)"
+t "tv-verify refuses a target without a profile, a bad profile name and a plain-http webhook before connecting" "2 2 2" \
+  "$(rcv vf 127.0.0.1:5555) $(rcv vf 'bad profile=127.0.0.1:5555') $(rcv vf --webhook http://hook.example.invalid/x firetv-stick-4k-max-2023=127.0.0.1:5555)"
+
 [ "$fail" -eq 0 ] && echo "all passed" || echo "FAILURES"
 exit "$fail"

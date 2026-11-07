@@ -1,0 +1,17 @@
+# tv-verify.service — tweak.sh verify against the TVs named below, started by tv-verify.timer.
+# A user unit (systemctl --user), because the TV authorised this user's adb key (~/.android/adbkey);
+# a system unit would run adb as root with a key of its own, unauthorised. `loginctl enable-linger`
+# keeps user timers running while nobody is logged in.
+#   mkdir -p ~/.config/systemd/user && cp tv-verify.service tv-verify.timer ~/.config/systemd/user/
+#   printf 'WEBHOOK_URL=https://discord.com/api/webhooks/...\n' > ~/.config/tv-verify.env && chmod 600 ~/.config/tv-verify.env
+#   systemctl --user daemon-reload && systemctl --user enable --now tv-verify.timer
+# Edit ExecStart: where the clone is, and one <profile>=<ip:port> per TV (a fixed address; docs/homelab.md).
+[Unit]
+Description=tweak.sh verify against every TV, drift to the webhook
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/tv-verify.env
+ExecStart=%h/tv-tweak/homelab/tv-verify.sh sharp-4k-googletv=192.0.2.10:5555 firetv-stick-4k-max-2023=192.0.2.11:5555
+# A TV that sleeps answers nothing for a minute per adb call; three TVs in a row still fit.
+TimeoutStartSec=10min

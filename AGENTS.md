@@ -11,7 +11,7 @@ Run from the repository root. None of these touches a device or the network.
 - `./test.sh`: profile parsing and the shape of every shipped profile.
 - `./test-flows.sh`: every command end to end against a simulated TV (a fake adb in a temporary
   directory); takes about half a minute.
-- `shellcheck tweak.sh test.sh test-flows.sh check-pins.sh`: must be clean.
+- `shellcheck tweak.sh test.sh test-flows.sh check-pins.sh homelab/tv-verify.sh`: must be clean.
 - `sh -n tweak.sh`, and the same with `dash -n` and `busybox sh -n` where available.
 
 CI (`.github/workflows/ci.yml`) runs all of them on ubuntu-latest and macos-latest.
@@ -30,6 +30,8 @@ changes.
   (`<tier> <package>`), `keep.conf`, `apps.conf`, `settings.conf`, and a `README.md` saying what was
   verified.
 - `test.sh` sources tweak.sh with `TWEAK_LIB=1`; `test-flows.sh` builds its fake adb and TV itself.
+- `homelab/`: `tv-verify.sh` (verify for a timer, drift to a webhook) with its systemd user units and
+  the OpenWrt rule; `docs/homelab.md` is the page that explains them.
 
 ## Conventions
 
