@@ -168,6 +168,7 @@ ro.product.device=karat
 ro.serialno=FAKESERIAL0001
 ro.build.version.release=11
 ro.build.fingerprint=Amazon/karat/karat:11/PS8180/0000:user/amz-p,release-keys
+ro.build.version.security_patch=2025-03-05
 init.svc.drm=running
 init.svc.mediadrm=running
 ro.vendor.amzn_drm.widevine=yes
@@ -378,6 +379,7 @@ ro.product.device=maniatika
 ro.serialno=FAKESHARP01
 ro.build.version.release=14
 ro.build.fingerprint=SHARP/maniatika/maniatika:14/UTT1.0/0000:user/release-keys
+ro.build.version.security_patch=2025-09-05
 init.svc.drm=running
 init.svc.mediadrm=running
 PROPS
@@ -497,6 +499,10 @@ apps restore >/dev/null 2>&1 || true
 t "restore leaves sideloads alone without --apps" "yes" "$(grep -qx com.example.a "$T/tv-ap/thirdparty" && echo yes)"
 t "restore --apps removes everything apps added" "0 none" \
   "$(if apps restore --apps >/dev/null 2>&1; then echo 0; else echo $?; fi) $(if [ -s "$T/tv-ap/thirdparty" ]; then cat "$T/tv-ap/thirdparty"; else echo none; fi)"
+
+tv inf
+t "info shows the security patch level beside the build" "yes" \
+  "$(run inf info 2>/dev/null | grep -q 'ro.build.version.security_patch *2025-03-05' && echo yes)"
 
 # apps status shows what is there; apps --upgrade puts the pins over it, a Play Store app aside.
 copy up; cp "$A" "$T/up/devices/firetv-stick-4k-max-2023/apps.conf"; echo "com.example.play|play|" >> "$T/up/devices/firetv-stick-4k-max-2023/apps.conf"

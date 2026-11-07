@@ -104,7 +104,9 @@ used on before is refused, which guards against DHCP handing the IP to another T
 of the same model, add `--new-device` once and it gets its own record.
 
 Run `verify` after reboots and after installing anything: some firmware re-enables packages on
-its own, and `verify` reports exactly which ones drifted.
+its own, and `verify` reports exactly which ones drifted. `info` shows the firmware's security
+patch level, the one reading over ADB of how far behind the system is; whether an update is
+waiting, only the TV's own settings screen knows.
 
 ## Profiles
 

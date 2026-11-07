@@ -453,7 +453,9 @@ on_exit() {
 
 cmd_info() {
     echo "profile: $PROFILE ($model)"
-    for k in ro.product.model ro.product.device ro.build.version.release ro.product.cpu.abilist ro.build.fingerprint; do
+    # The security patch level is the one reading of how far behind the firmware is that ADB gives; whether an
+    # update is waiting only the TV's own settings screen knows.
+    for k in ro.product.model ro.product.device ro.build.version.release ro.build.version.security_patch ro.product.cpu.abilist ro.build.fingerprint; do
         v=$(dev getprop "$k") || die "could not read $k from $DEVICE"
         printf '  %-26s %s\n' "$k" "$v"
     done
