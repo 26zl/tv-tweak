@@ -6,7 +6,7 @@ instead.
 ## Before a pull request
 
 ```sh
-./test.sh && ./test-flows.sh && shellcheck tweak.sh test.sh test-flows.sh check-pins.sh
+./test.sh && ./test-flows.sh && shellcheck tweak.sh test.sh test-flows.sh check-pins.sh homelab/tv-verify.sh
 ```
 
 None of these needs a device. CI runs them on Linux and macOS; keep them green.
@@ -14,7 +14,7 @@ None of these needs a device. CI runs them on Linux and macOS; keep them green.
 - POSIX `sh` only; it must run under dash, `bash --posix` and busybox sh, and on macOS.
 - Keep the existing style: four-space indent, comments that explain why. There is no formatter.
 - A change in behaviour comes with a case in `test-flows.sh`, a bug fix with a regression test.
-- Add a line to [CHANGELOG.md](CHANGELOG.md) under "Unreleased".
+- The commit message says why; there is no changelog, `git log` is the history.
 
 ## Adding a device
 

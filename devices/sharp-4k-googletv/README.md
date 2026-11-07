@@ -54,7 +54,9 @@ is allowed), so joining a network goes through the TV's own settings; the rest i
 | `cast` | no | Chromecast built-in, DIAL and Miracast — phones can no longer cast |
 
 `tune` turns animations off and location off. No Google TV package disabled here re-enables
-itself; `verify` will tell you if that changes after an update.
+itself; a firmware update does: the November 2026 build brought back the on-screen manual and set
+`animator_duration_scale` to 1.0 again. `verify` named both, `debloat cruft` and `tune` put them
+back. Run `verify` after every update.
 
 ## Launcher
 
@@ -104,4 +106,5 @@ Auto-update apps if you want updates to wait for you.
 The TV honours Private DNS like any Android 14 device: `./tweak.sh dns <host>` sets it. If your
 router forces DNS through its own resolver and rejects port 853 (OpenWrt's `https-dns-proxy`
 does this by default), validation fails and the TV reports "No internet" — allow 853 for the TV's
-address ahead of the reject rule, or leave DNS to the router.
+address ahead of the reject rule, or leave DNS to the router. [docs/homelab.md](../../docs/homelab.md)
+has the OpenWrt rule.
