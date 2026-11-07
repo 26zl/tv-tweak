@@ -92,7 +92,7 @@ All `armeabi-v7a` — **this device is 32-bit** and rejects `arm64-v8a`.
 | App | Package | Why |
 | --- | --- | --- |
 | TV Bro 2.1.6 | `com.phlox.tvwebbrowser` | D-pad browser replacing Silk; the `geckoExcluded` build is 6.8 MB against 150 MB, and this device has 1.7 GB RAM |
-| Obtainium 1.6.17 | `dev.imranr.obtainium` | Installs and updates apps from GitHub releases |
+| Obtainium 1.7.4 | `dev.imranr.obtainium` | Installs and updates apps from GitHub releases |
 | F-Droid | `org.fdroid.fdroid` | FOSS repository |
 | Mullvad 2026.12 | `net.mullvad.mullvadvpn` | VPN, with a proper leanback icon |
 

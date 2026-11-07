@@ -31,7 +31,7 @@ if [ -n "${TWEAK_STATE:-}" ]; then STATE_ROOT=$TWEAK_STATE
 elif [ "$(uname -s)" = Darwin ]; then STATE_ROOT="$HOME/Library/Application Support/tv-tweak"
 else STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/tv-tweak"
 fi
-STATE=; LOGGING=; NEW_DEVICE=; FORCE=; DRY_RUN=; WITH_APPS=
+STATE=; LOGGING=; NEW_DEVICE=; FORCE=; DRY_RUN=; WITH_APPS=; UPGRADE=
 
 die() { echo "error: $*" >&2; if [ -n "$LOGGING" ]; then log "error: $*"; fi; exit 1; }
 usage_error() { echo "error: $*" >&2; echo "see: $0 --help" >&2; exit 2; }
@@ -302,6 +302,10 @@ home_pref() {
         /<item name="/ { sub(/.*<item name="/, ""); sub(/".*/, ""); item = $0 }
         /android\.intent\.category\.HOME/ && item != "" { print item; exit }'
 }
+# Whether a package has an accessibility service enabled: that is how a launcher takes the Home button
+# over on Fire OS and Google TV while Android still resolves Home to the stock one.
+takes_home() { dev 'settings get secure enabled_accessibility_services' 2>/dev/null | grep -qF -- "$1/"; }
+
 home_resolved() {
     res=$(dev 'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME --user 0') \
         || return 1
@@ -449,7 +453,9 @@ on_exit() {
 
 cmd_info() {
     echo "profile: $PROFILE ($model)"
-    for k in ro.product.model ro.product.device ro.build.version.release ro.product.cpu.abilist ro.build.fingerprint; do
+    # The security patch level is the one reading of how far behind the firmware is that ADB gives; whether an
+    # update is waiting only the TV's own settings screen knows.
+    for k in ro.product.model ro.product.device ro.build.version.release ro.build.version.security_patch ro.product.cpu.abilist ro.build.fingerprint; do
         v=$(dev getprop "$k") || die "could not read $k from $DEVICE"
         printf '  %-26s %s\n' "$k" "$v"
     done
@@ -674,18 +680,26 @@ cmd_apps() {
     done
     command -v curl >/dev/null 2>&1 || [ -n "$DRY_RUN" ] || die "apps needs curl to download; install it first"
     all=$(pkg_list '') || exit 1
+    sel=$*
     # Removed by on_exit; an interrupt ends the run through the same path, so a download goes too.
     tmp=$(mktemp -d)
     fail=0
     while IFS='|' read -r name url want flag; do
         [ -n "$name" ] || continue
-        if [ $# -gt 0 ]; then
-            case " $* " in *" $name "*) ;; *) continue ;; esac
+        if [ -n "$sel" ]; then
+            case " $sel " in *" $name "*) ;; *) continue ;; esac
         elif [ "${flag:-}" = optional ]; then
             continue
         fi
-        if printf '%s\n' "$all" | grep -qxF -- "$name"; then echo "  ok   $name is already installed"; continue; fi
-        if [ -n "$DRY_RUN" ]; then echo "  would install $name from $url"; continue; fi
+        replace=
+        if printf '%s\n' "$all" | grep -qxF -- "$name"; then
+            if [ -z "$UPGRADE" ]; then echo "  ok   $name is already installed"; continue; fi
+            # --upgrade: the pin goes in over what is there. Android refuses a downgrade by itself, and a
+            # Play Store app is the store's to update.
+            if [ "$url" = play ]; then echo "  --   $name updates through the Play Store"; continue; fi
+            replace=1
+        fi
+        if [ -n "$DRY_RUN" ]; then echo "  would install $name from $url${replace:+ over the installed version}"; continue; fi
         if [ "$url" = play ]; then
             if sh_ am start -a android.intent.action.VIEW -d "$(q "market://details?id=$name")" >/dev/null 2>&1; then
                 echo "  $name: Play Store listing opened on the TV — press Install with the remote"
@@ -701,8 +715,10 @@ cmd_apps() {
         if [ "$(sha256 "$tmp/$name.apk")" != "$want" ]; then
             echo "  FAILED   $name: checksum mismatch — not installed" >&2; fail=$((fail + 1)); continue
         fi
-        if out=$(timed 900 "$ADB" -s "$DEVICE" install "$tmp/$name.apk" 2>&1 </dev/null); then
-            echo "  installed $name"; echo "$name" >> "$STATE/apps.txt"
+        if [ -n "$replace" ]; then set -- install -r "$tmp/$name.apk"; else set -- install "$tmp/$name.apk"; fi
+        if out=$(timed 900 "$ADB" -s "$DEVICE" "$@" 2>&1 </dev/null); then
+            echo "  installed $name${replace:+ (replaced)}"
+            grep -qxF -- "$name" "$STATE/apps.txt" 2>/dev/null || echo "$name" >> "$STATE/apps.txt"
         else
             rc=$?; echo "  FAILED   $name: $(reason "$out" "$rc" 900)" >&2; fail=$((fail + 1))
         fi
@@ -711,6 +727,27 @@ cmd_apps() {
 $APPS
 EOF
     [ "$fail" -eq 0 ]
+}
+
+# Each app in apps.conf: the version installed, or not installed, and the pin it would get from `apps`
+# (the release path, or the Play Store). check-pins.sh is what compares the pins with upstream.
+cmd_apps_status() {
+    all=$(pkg_list '') || exit 1
+    printf '%s\n' "$APPS" | while IFS='|' read -r name url want flag; do
+        [ -n "$name" ] || continue
+        if printf '%s\n' "$all" | grep -qxF -- "$name"; then
+            v=$(dev "dumpsys package $name" 2>/dev/null | sed -n 's/^ *versionName=//p' | head -1)
+            have="installed ${v:-?}"
+        else
+            have="not installed"
+        fi
+        case $url in
+            play) pin="Play Store" ;;
+            *) pin=${url#*/releases/download/}; [ "$pin" != "$url" ] || pin=${url##*/} ;;
+        esac
+        printf '  %-28s %-22s pin %s%s\n' "$name" "$have" "$pin" "${flag:+ ($flag)}"
+    done
+    echo "apps installs what is missing; apps --upgrade puts the pins over what is there; check-pins.sh compares the pins with upstream"
 }
 
 # HTTPS only, redirects included, with limits. F-Droid moves a version from repo/ to archive/ once
@@ -827,7 +864,11 @@ EOF
     fi
     case $pref in
         ''|"${home%%/*}"/*) ;;
-        *) echo "  WARN ${pref%%/*} is set as home, but Home goes to ${home%%/*}" ;;
+        *) if takes_home "${pref%%/*}"; then
+               echo "  ok   ${pref%%/*} takes the Home button over with its accessibility service (Android resolves Home to ${home%%/*})"
+           else
+               echo "  WARN ${pref%%/*} is set as home, but Home goes to ${home%%/*}"
+           fi ;;
     esac
 
     if [ -n "$DEEP" ]; then
@@ -909,7 +950,11 @@ cmd_home() {
             echo "$now"
             case $pref in
                 ''|"${now%%/*}"/*) ;;
-                *) echo "note: ${pref%%/*} is set as home, but Android sends Home to the launcher above" >&2 ;;
+                *) if takes_home "${pref%%/*}"; then
+                       echo "note: ${pref%%/*} takes the Home button over with its accessibility service; Android itself resolves Home to the launcher above" >&2
+                   else
+                       echo "note: ${pref%%/*} is set as home, but Android sends Home to the launcher above" >&2
+                   fi ;;
             esac ;;
         *)
             is_pkg "$1" || die "not a package name: '$1'"
@@ -965,6 +1010,7 @@ usage: $(basename "$0") [options] <command> [arguments]
   restore [--apps]      undo this tool: packages, settings and launcher; --apps also removes its sideloads
   tune                  apply the profile's settings.conf, trim caches ('perf' is an old name)
   apps [package...]     sideload the profile's apps.conf (checksum-pinned); optional ones by name
+  apps status           each app in apps.conf: the version installed, and its pin
   verify                DRM props, protected packages, drift, launcher
   status                list currently disabled packages
   launch <package>      start an app that has no home-screen icon (e.g. F-Droid)
@@ -978,6 +1024,7 @@ options, anywhere on the line:
   --deep                verify: also launch each installed media app (takes over the TV)
   --new-device          start a separate record for a second TV of the same model
   --force               change a TV that is not the device its profile was built for
+  --upgrade             apps: install the pins over the versions installed (Play Store apps are left to the store)
   --dry-run             show what a command would change; nothing on the TV or in its state changes
   -h, --help            this text; never touches the TV
   --version             print the version
@@ -1011,6 +1058,7 @@ while [ $# -gt 0 ]; do
         --force)   FORCE=1 ;;
         --dry-run) DRY_RUN=1 ;;
         --apps)    WITH_APPS=1 ;;
+        --upgrade) UPGRADE=1 ;;
         -*)        usage_error "unknown option '$1'" ;;
         *)  if [ -z "$cmd" ]; then cmd=$1
             elif is_tok "$1"; then args="$args $1"
@@ -1023,6 +1071,7 @@ done
 if [ -n "$PROFILE" ] && ! is_profile "$PROFILE"; then usage_error "invalid profile name '$PROFILE'"; fi
 if [ -n "$DEEP" ] && [ "$cmd" != verify ]; then usage_error "--deep only applies to verify"; fi
 if [ -n "$WITH_APPS" ] && [ "$cmd" != restore ]; then usage_error "--apps only applies to restore"; fi
+if [ -n "$UPGRADE" ] && [ "$cmd" != apps ]; then usage_error "--upgrade only applies to apps"; fi
 case $DRY_RUN:$cmd in
     1:info|1:verify|1:status|1:launch|1:help) usage_error "--dry-run applies to commands that change something" ;;
 esac
@@ -1034,7 +1083,14 @@ case $cmd in
     info|backup|restore|tune|perf|verify|status|adb-off)
         [ $# -eq 0 ] || usage_error "$cmd takes no arguments" ;;
     apps)
-        for p in "$@"; do is_pkg "$p" || usage_error "apps takes package names from apps.conf"; done ;;
+        if [ "${1:-}" = status ]; then
+            [ $# -eq 1 ] || usage_error "apps status takes nothing else"
+            [ -z "$DRY_RUN" ] || usage_error "--dry-run applies to commands that change something"
+            [ -z "$UPGRADE" ] || usage_error "--upgrade only applies to apps"
+            cmd=apps-status; shift
+        else
+            for p in "$@"; do is_pkg "$p" || usage_error "apps takes package names from apps.conf, or status"; done
+        fi ;;
     debloat) ;;
     launch)
         if [ $# -ne 1 ] || ! is_pkg "$1"; then usage_error "launch takes one package name"; fi ;;
@@ -1060,7 +1116,7 @@ connect; load_profile; load_state
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 case $cmd in
-    info|verify|status|launch) ;;
+    info|verify|status|launch|apps-status) ;;
     *)  check_known
         case $cmd in restore|backup|adb-off) ;; *) check_model ;; esac
         if [ -n "$DRY_RUN" ]; then

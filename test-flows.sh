@@ -125,6 +125,10 @@ cat > "$T/dev/dumpsys" <<'EOF'
 S=$FAKE_TV
 case $1 in
     package)
+        # dumpsys package <name>: the installed version, from $S/versions (<package> <version>), as apps status reads it
+        if [ -n "${2:-}" ] && grep -qxF -- "$2" "$S/installed"; then
+            echo "    versionName=$(awk -v p="$2" '$1 == p {print $2}' "$S/versions" 2>/dev/null)"
+        fi
         if [ -s "$S/home" ]; then
             printf '<preferred-activities>\n<item name="%s" match="100000" set="1">\n' "$(cat "$S/home")"
             printf '<cat name="android.intent.category.HOME" />\n</item>\n</preferred-activities>\n'
@@ -164,6 +168,7 @@ ro.product.device=karat
 ro.serialno=FAKESERIAL0001
 ro.build.version.release=11
 ro.build.fingerprint=Amazon/karat/karat:11/PS8180/0000:user/amz-p,release-keys
+ro.build.version.security_patch=2025-03-05
 init.svc.drm=running
 init.svc.mediadrm=running
 ro.vendor.amzn_drm.widevine=yes
@@ -374,6 +379,7 @@ ro.product.device=maniatika
 ro.serialno=FAKESHARP01
 ro.build.version.release=14
 ro.build.fingerprint=SHARP/maniatika/maniatika:14/UTT1.0/0000:user/release-keys
+ro.build.version.security_patch=2025-09-05
 init.svc.drm=running
 init.svc.mediadrm=running
 PROPS
@@ -494,6 +500,23 @@ t "restore leaves sideloads alone without --apps" "yes" "$(grep -qx com.example.
 t "restore --apps removes everything apps added" "0 none" \
   "$(if apps restore --apps >/dev/null 2>&1; then echo 0; else echo $?; fi) $(if [ -s "$T/tv-ap/thirdparty" ]; then cat "$T/tv-ap/thirdparty"; else echo none; fi)"
 
+tv inf
+t "info shows the security patch level beside the build" "yes" \
+  "$(run inf info 2>/dev/null | grep -q 'ro.build.version.security_patch *2025-03-05' && echo yes)"
+
+# apps status shows what is there; apps --upgrade puts the pins over it, a Play Store app aside.
+copy up; cp "$A" "$T/up/devices/firetv-stick-4k-max-2023/apps.conf"; echo "com.example.play|play|" >> "$T/up/devices/firetv-stick-4k-max-2023/apps.conf"
+appsu() ( FAKE_CURL_MAP=$T/curlmap PATH=$T/curlbin:$PATH TWEAK_SH=$T/up/tweak.sh run up "$@" )
+tv up; printf 'com.example.a\ncom.example.play\n' >> "$T/tv-up/installed"; echo "com.example.a 0.9" > "$T/tv-up/versions"
+st=$(appsu apps status 2>/dev/null)
+t "apps status lists each app with its installed version and its pin" "yes yes yes" \
+  "$(echo "$st" | grep -q 'com.example.a .*installed 0.9 .*pin a.apk' && echo yes) $(echo "$st" | grep -q 'com.example.fd .*not installed' && echo yes) $(echo "$st" | grep -q 'com.example.play .*pin Play Store' && echo yes)"
+: > "$T/curlmap.log"; appsu apps com.example.a >/dev/null 2>&1
+t "apps leaves an installed app alone; apps --upgrade replaces it and records it once" "yes 0 yes 1" \
+  "$([ ! -s "$T/curlmap.log" ] && echo yes) $(if appsu apps --upgrade com.example.a >/dev/null 2>&1; then echo 0; else echo $?; fi) $(grep -q a.apk "$T/curlmap.log" && echo yes) $(appsu apps --upgrade com.example.a >/dev/null 2>&1; grep -cx com.example.a "$(state up)/apps.txt")"
+t "--upgrade belongs to apps, apps status takes nothing else, and a Play Store app is left to the store" "2 2 yes" \
+  "$(rc up verify --upgrade) $(rc up apps status extra) $(appsu apps --upgrade com.example.play 2>/dev/null | grep -q 'updates through the Play Store' && echo yes)"
+
 # restore also puts the launcher back.
 tv hm; echo com.example.launcher/.Home >> "$T/tv-hm/home_candidates"; echo com.example.launcher >> "$T/tv-hm/installed"
 run hm debloat >/dev/null 2>&1; run hm home com.example.launcher >/dev/null 2>&1
@@ -505,6 +528,10 @@ t "verify checks where Home goes, and names the setting it ignores" "0 yes yes" 
   "$(rc hm verify) $(run hm verify | grep -q '^  ok   com.amazon.tv.launcher/' && echo yes) $(run hm verify | grep -q 'WARN com.example.launcher is set as home' && echo yes)"
 t "home show prints where Home goes, and the setting Android ignores" "yes yes" \
   "$(run hm home show 2>/dev/null | grep -qx 'com.amazon.tv.launcher/.ui.HomeActivity_vNext' && echo yes) $(run hm home show 2>&1 >/dev/null | grep -q 'com.example.launcher is set as home' && echo yes)"
+echo 'com.example.launcher/com.example.launcher.Svc:com.other/.X' > "$T/tv-hm/settings/secure/enabled_accessibility_services"
+t "a launcher that takes Home over with its accessibility service is the working state, not a warning" "0 yes no yes" \
+  "$(rc hm verify) $(run hm verify | grep -q 'ok   com.example.launcher takes the Home button over' && echo yes) $(run hm verify | grep -q 'WARN com.example.launcher' && echo yes || echo no) $(run hm home show 2>&1 >/dev/null | grep -q 'takes the Home button over' && echo yes)"
+rm -f "$T/tv-hm/settings/secure/enabled_accessibility_services"
 run hm restore >/dev/null 2>&1
 t "restore puts the previous launcher back" "com.amazon.tv.launcher/.ui.HomeActivity_vNext" "$(cat "$T/tv-hm/home")"
 tv hf; touch "$T/tv-hf/home_follows"; echo com.example.launcher/.Home >> "$T/tv-hf/home_candidates"; echo com.example.launcher >> "$T/tv-hf/installed"
