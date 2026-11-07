@@ -69,7 +69,11 @@ changes.
 - `home` sets a preferred activity, which Android ignores while a launcher with a higher HOME
   priority is enabled (Fire OS, Google TV); `set-home-activity` prints Success either way.
   `home_resolved` is where Home goes and what `verify` checks; `home_activity` is what `restore`
-  records and puts back.
+  records and puts back. A launcher that takes the Home button over with an accessibility service
+  (Projectivy) leaves `home_resolved` at the stock one; `takes_home` reads
+  `enabled_accessibility_services`, and `verify` and `home show` report that as the working state.
+- `apps` leaves an installed app alone; `apps --upgrade` installs the pin over it (`install -r`) and
+  records it; `apps status` reads `versionName` from `dumpsys package`.
 - macOS's Local Network privacy turns away a program it has not allowed with "No route to host",
   and the adb server keeps the permission of the app that started it.
 

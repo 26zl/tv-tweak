@@ -56,6 +56,7 @@ export DEVICE=192.168.1.50:5555        # only if several devices are attached
   restore [--apps]      undo this tool: its packages, settings and launcher; --apps also its sideloads
   tune                  apply the profile's settings.conf, trim caches
   apps [package...]     sideload the profile's apps.conf (checksum-pinned); optional ones by name
+  apps status           each app in apps.conf: the version installed, and its pin
   verify                DRM props, protected packages, drift, launcher
   status                list currently disabled packages
   launch <package>      start an app with no home-screen icon
@@ -69,6 +70,7 @@ options, anywhere on the line:
   --deep                verify: also launch each installed media app (takes over the TV)
   --new-device          start a separate record for a second TV of the same model
   --force               change a TV that is not the device its profile was built for
+  --upgrade             apps: install the pins over the versions installed (Play Store apps are left to the store)
   --dry-run             show what a command would change; nothing on the TV or in its state changes
   -h, --help            usage; never touches the TV
   --version             print the version
@@ -154,7 +156,10 @@ by hand on each verified device after the full debloat and `tune`.
 `apps` downloads over HTTPS only, redirects included, and refuses any APK whose checksum differs
 from the pin; each pin in `apps.conf` was checked against the digest its project publishes, on the
 date given. An app that is already installed is left alone, whatever its version, and entries
-marked `optional` are installed only when named. What `apps` installs is recorded, and
+marked `optional` are installed only when named. `apps status` lists each app's installed version
+beside its pin, `apps --upgrade` installs the pins over what is there (Android refuses a downgrade,
+and a Play Store app is the store's to update), and `check-pins.sh` says when a pin has fallen
+behind its project. What `apps` installs is recorded, and
 `restore --apps` removes it. Both verified devices are 32-bit (`armeabi-v7a`) and reject
 `arm64-v8a`-only builds.
 
