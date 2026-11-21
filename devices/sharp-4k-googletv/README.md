@@ -2,7 +2,7 @@
 
 Verified on **Sharp 4K UHDTV, MediaTek MT9676 (`maniatika`), Google TV on Android 14,
 armeabi-v7a**. The package list comes from `pm list packages` on that device: 164 packages enabled
-on a fresh set, 16 disabled by the default tiers.
+on a fresh set, 13 disabled by the default tiers.
 
 The TV is **32-bit** despite the 4K badge — `ro.product.cpu.abilist` is `armeabi-v7a,armeabi` —
 so every sideload in `apps.conf` is a v7a build.
@@ -31,13 +31,24 @@ adb tcpip 5555          # while connected over wireless debugging
 
 Then switch the TV to Ethernet (Settings → Network, Wi-Fi off), and `tweak.sh` finds it over
 mDNS as `_adb._tcp` on port 5555. The pairing key doubles as the authorisation for port 5555, so
-there is no prompt. The port lives in `service.adb.tcp.port`, which a reboot clears, and the
-persistent variant is refused for the shell user — after a reboot, repeat: Wi-Fi on, wireless
-debugging, `adb tcpip 5555`, Wi-Fi off.
+there is no prompt at first.
+
+The port stays armed across reboots. `service.adb.tcp.port` is not a persistent property and the
+persistent variant is refused for the shell user, yet 37 seconds after an `adb reboot` on build
+`UKN7.260716.012` port 5555 answered again, Wi-Fi off, with the property back at 5555; nothing in
+the init scripts the shell user can read sets it. So the routine above is done once, and a reboot
+does not close the port.
+
+The authorisation does lapse. Android forgets an adb key that has not connected for seven days
+(`adb_allowed_connection_time`, unset on this TV), and after two weeks without a connection the
+TV put *Allow USB debugging?* on its screen at the next one. `tweak.sh` says so and waits
+`TWEAK_TIMEOUT` seconds for it to be accepted with the remote; tick *Always allow from this
+computer*. A key that connects every few days, as with `verify` on a timer, is not forgotten.
 
 Port 5555 is plain, unencrypted ADB, advertised over mDNS: anything on the network can reach it,
-and only the authorisation keeps it out. When you are done, run `./tweak.sh adb-off` (or reboot,
-which closes the port), and turn debugging back on when you next need the tool.
+and only the authorisation keeps it out. When you are done, run `./tweak.sh adb-off`, and turn USB
+debugging back on when you next need the tool. Whether that alone brings port 5555 back, or the
+wireless-debugging step has to be repeated, has not been tried.
 
 `cmd wifi connect-network` is refused for the shell user on this production build (`forget-network`
 is allowed), so joining a network goes through the TV's own settings; the rest is scriptable.
@@ -49,14 +60,23 @@ is allowed), so joining a network goes through the TV's own settings; the rest i
 | `ads` | yes | Anoki ACR (fingerprints whatever is on screen), crash/usage uploaders, Privacy Sandbox, partner setup |
 | `promo` | yes | Prime Video (so it is not on the keep list), Play Games, YouTube Music, retail demo |
 | `ota` | no | Vendor firmware updater, which also delivers security fixes; Play and GMS updates are unaffected |
-| `cruft` | yes | On-screen manual, MHEG-5 |
+| `cruft` | yes | MHEG-5 |
 | `assistant` | no | Voice search and Assistant stop working |
 | `cast` | no | Chromecast built-in, DIAL and Miracast — phones can no longer cast |
 
-`tune` turns animations off and location off. No Google TV package disabled here re-enables
-itself; a firmware update does: the November 2026 build brought back the on-screen manual and set
-`animator_duration_scale` to 1.0 again. `verify` named both, `debloat cruft` and `tune` put them
-back. Run `verify` after every update.
+`tune` turns window and transition animations off and location off.
+
+Two things the firmware puts back at every boot, and the profile leaves them alone for that
+reason: `mediatek.factorymenu.ui` re-enables the on-screen manual (`com.mtc.emanual`) about a
+minute after boot, and `com.mediatek.tv.agent` writes `animator_duration_scale` back to 1.0 within
+the first 40 seconds. Both were watched through a reboot on build `UKN7.260716.012`, with nothing
+else touching the TV. An earlier version of this page put them down to a firmware update; an
+update reboots the TV, and the reboot is enough. On a TV where an earlier version of the profile
+disabled the manual or set the scale, `verify` reports both as given up instead of failing on
+them, and `restore` clears the record.
+
+The 15 other packages disabled on that set, by the default tiers and `ota`, were still off after
+the same reboot. Run `verify` after reboots and updates all the same.
 
 ## Launcher
 
@@ -90,6 +110,34 @@ system (Xiaomi TV A Pro 2026).
 Not automated, worth a minute with the remote: Settings → Privacy → Ads (reset or delete the
 advertising ID), Settings → Privacy → Usage & diagnostics (off), and Play Store → Settings →
 Auto-update apps if you want updates to wait for you.
+
+## Picture and sound
+
+Not automated either, and `settings.conf` cannot carry them: nothing of the picture or the sound
+output is in the `settings` tables. The picture values live in `com.mediatek.tv.agent`, whose
+provider refuses the shell user, so the TV's own menus are the only way in. They open over
+whatever input is on screen, where `uiautomator dump` still reads them and `screencap` does not:
+
+```sh
+adb shell am start -a android.settings.DISPLAY_SETTINGS            # Picture, for the input on screen
+adb shell am start -a android.settings.oem.AUDIO_OUTPUT_SETTINGS   # Digital output, output device
+adb shell am start -a android.settings.oem.SOUND_SETTINGS          # Sound style, speakers, eARC
+```
+
+Worth a look with a console on HDMI (checked with an Xbox Series S on build `UKN7.260716.012`):
+
+- Picture → Advanced settings → *Enhanced viewing angle* is on by default. The driver calls it
+  VAC, viewing-angle compensation: it trades contrast seen head-on for the view from the side, so
+  a seat in front of the screen is better off without it. Switching it off does not outlast a
+  reboot: at the one reboot this was watched through, the panel driver came up with it on again.
+- Picture values are kept per source and per signal type, so SDR, HDR10 and Dolby Vision each
+  have a picture mode of their own, a *Game* one among them. HDR10 from the console came up in
+  *Movie*. Low latency follows ALLM whatever the mode.
+- Advanced settings → *Refresh rate* is a frame-rate counter on the screen, not a setting.
+- *Digital output* refuses to change while *Dolby Audio processing* is on, and that switch is
+  greyed out while the output device is optical. Over optical the TV sends stereo PCM at a fixed
+  level: the volume number on its screen changes nothing, and a soundbar that has learned the
+  remote does the work.
 
 ## Sideloaded apps
 

@@ -64,6 +64,12 @@ changes.
   `apps.txt`, `baseline.txt`) and keeps whatever it could not undo; that record must never be lost.
 - `settings.txt` keeps originals shell-quoted, `null` for unset; bare tokens from older versions are
   still read.
+- A profile gives an entry up by dropping it: `verify` reports a recorded package or setting that
+  the profile no longer lists, and does not fail on it, since no command would apply it again; the
+  record stays for `restore`. The Sharp's on-screen manual and `animator_duration_scale` went that
+  way, because its firmware puts both back at every boot.
+- `connect` waits `TWEAK_TIMEOUT` seconds on an unauthorised TV instead of retrying past its prompt:
+  Android forgets an adb key that has not connected for seven days and asks again on the screen.
 - A `settings.conf` line with a fourth column belongs to that tier and is applied by
   `debloat <tier>`. The `ota` tier is opt-in because it stops security updates.
 - `home` sets a preferred activity, which Android ignores while a launcher with a higher HOME

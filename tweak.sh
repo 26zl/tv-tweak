@@ -317,6 +317,20 @@ home_activity() {
     home_resolved
 }
 
+# A TV that does not trust this computer's key puts a prompt on its screen and holds the connection
+# until somebody answers. That is not only a first connection: Android forgets a key that has not
+# connected for a week, so a TV that needed no prompt last month asks again. The connection is the
+# one the answer belongs to, so it is waited on, for as long as any adb call gets.
+await_auth() {
+    echo "$DEVICE has not authorised this computer: accept the debugging prompt on its screen with the remote, 'Always allow' ticked (waiting up to ${ADB_TIMEOUT}s)" >&2
+    n=0
+    while [ "$n" -lt "$ADB_TIMEOUT" ]; do
+        sleep 1; n=$((n + 1))
+        if sh_ true >/dev/null 2>&1; then return 0; fi
+    done
+    return 1
+}
+
 connect() {
     command -v "$ADB" >/dev/null 2>&1 \
         || die "adb not found. Install Android platform-tools and put it on PATH, or set ADB=/path/to/adb"
@@ -328,6 +342,13 @@ connect() {
         if [ -z "$DEVICE" ]; then
             DEVICE=$("$ADB" mdns services 2>/dev/null | awk '$2=="_adb._tcp" || $2=="_adb-tls-connect._tcp" {print $3}' | sort -u | head -2 | tr '\n' ' ')
             how="found over mDNS"
+        fi
+        # Last, a TV adb lists as unauthorised: it is there, and the wait below is what gets it
+        # authorised. After the others, so a phone on USB that never trusted this computer does not
+        # stand in for a TV that mDNS finds.
+        if [ -z "$DEVICE" ]; then
+            DEVICE=$("$ADB" devices | awk '$2=="unauthorized" {print $1}' | head -2 | tr '\n' ' ')
+            how="listed by adb, not authorised yet"
         fi
         case "$DEVICE" in
             '')       die "no device. Set DEVICE=<ip>:<port> or connect one first" ;;
@@ -341,7 +362,15 @@ connect() {
     i=0
     while :; do
         said=$("$ADB" connect "$DEVICE" 2>&1) || true
-        sh_ true >/dev/null 2>&1 && break
+        if why=$(sh_ true 2>&1); then break; fi
+        case $said$why in
+            *'failed to authenticate'*|*unauthorized*)
+                if await_auth; then break; fi
+                # Dropped, so the next run asks on a fresh connection instead of waiting on a prompt
+                # that may no longer be on the screen.
+                "$ADB" disconnect "$DEVICE" >/dev/null 2>&1 || true
+                die "$DEVICE has not authorised this computer: nobody accepted the debugging prompt on its screen within ${ADB_TIMEOUT}s. Wake the TV, run this again and accept it with 'Always allow' ticked; if no prompt shows, pair again with 'adb pair'. Android forgets a computer that has not connected for a week" ;;
+        esac
         i=$((i + 1))
         if [ "$i" -ge 3 ]; then
             # macOS's Local Network privacy turns a program it has not allowed away with this same
@@ -367,6 +396,13 @@ load_state() {
     STATE="$STATE_ROOT/$PROFILE/$SERIAL"
     BASELINE="$STATE/baseline.txt"; APPLIED="$STATE/applied.txt"; SETTINGS_FILE="$STATE/settings.txt"
     migrate_legacy
+    # A baseline without a build is state that came from backups/, which never recorded one, and
+    # firmware_warnings had nothing to compare for that TV. The build it had then is not known, so
+    # note the one it has now: the next change is reported. Where the directory cannot be written,
+    # the run goes on without the warning, as it did before.
+    if [ -z "$DRY_RUN" ] && [ -f "$BASELINE" ] && [ ! -f "$STATE/build.txt" ]; then
+        { echo "$BUILD" > "$STATE/build.txt"; } 2>/dev/null || true
+    fi
 }
 
 # Before 0.1.0 the state lived in backups/<profile>/ inside the clone, with the serial in serial.txt.
@@ -794,19 +830,28 @@ cmd_verify() {
     echo "--- packages this tool disabled are still disabled ---"
     applied=$APPLIED
     if [ -s "$applied" ]; then
-        back=
+        back=; dropped=0
         while read -r p; do
             [ -n "$p" ] || continue
             if ! printf '%s\n' "$disabled" | grep -qxF -- "$p"; then
-                echo "  FAIL $p was re-enabled"; back="$back $p"; rc=1
+                # Back on and gone from packages.conf: the profile gave it up, as the Sharp's did with
+                # the manual its firmware re-enables at every boot. No tier would turn it off again, so
+                # it is not drift; the record stays, and restore clears it.
+                if conf_lines "$CONF" | awk -v p="$p" '$2 == p {f = 1} END {exit !f}'; then
+                    echo "  FAIL $p was re-enabled"; back="$back $p"; rc=1
+                else
+                    echo "  --   $p is enabled again, and the profile no longer lists it"; dropped=$((dropped + 1))
+                fi
             fi
         done < "$applied"
-        if [ -z "$back" ]; then
-            echo "  ok   all $(grep -c . "$applied") still disabled"
-        else
+        if [ -n "$back" ]; then
             # Name the tiers: vizzini, say, sits in the opt-in alexa tier, which plain `debloat` skips.
             again=$(for p in $back; do conf_lines "$CONF" | awk -v p="$p" '$2 == p {print $1; exit}'; done | sort -u | tr '\n' ' ')
             echo "  re-run: $0 debloat ${again% }"
+        elif [ "$dropped" -eq 0 ]; then
+            echo "  ok   all $(grep -c . "$applied") still disabled"
+        else
+            echo "  ok   the other $(($(grep -c . "$applied") - dropped)) still disabled"
         fi
     else
         echo "  --   nothing recorded: debloat has not run on this TV, or restore cleared it"
@@ -814,7 +859,7 @@ cmd_verify() {
 
     echo "--- settings still applied ---"
     if [ -s "$SETTINGS_FILE" ]; then
-        drift=0
+        drift=0; dropped=0
         while read -r ns key want _; do
             [ -n "$key" ] || continue
             got=$(dev settings get "$ns" "$key") || die "could not read $ns $key from $DEVICE"
@@ -823,13 +868,20 @@ cmd_verify() {
                 case $key in
                     private_dns_*) again="$0 dns" ;;
                     screen_off_timeout|sleep_timeout) again="$0 sleep" ;;
-                    *) if [ -n "$tier" ]; then again="$0 debloat $tier"; else again="$0 tune"; fi ;;
+                    # Neither dns nor sleep wrote it, and settings.conf no longer has it: the profile
+                    # gave it up, so nothing would set it again and it is not drift.
+                    *) if ! printf '%s\n' "$SETTINGS" | awk -v n="$ns" -v k="$key" '$1 == n && $2 == k {f = 1} END {exit !f}'; then
+                           echo "  --   $key is '$got', and the profile no longer sets it"; dropped=$((dropped + 1)); continue
+                       fi
+                       if [ -n "$tier" ]; then again="$0 debloat $tier"; else again="$0 tune"; fi ;;
                 esac
                 echo "  FAIL $key is '$got', expected '$want' — re-run: $again"; drift=$((drift + 1)); rc=1
             fi
         done < "$SETTINGS_FILE"
         if [ "$drift" -eq 0 ]; then
-            echo "  ok   all $(grep -c . "$SETTINGS_FILE") settings hold"
+            if [ "$dropped" -eq 0 ]; then echo "  ok   all $(grep -c . "$SETTINGS_FILE") settings hold"
+            else echo "  ok   the other $(($(grep -c . "$SETTINGS_FILE") - dropped)) settings hold"
+            fi
         fi
     else
         echo "  --   nothing recorded: tune, dns and sleep have not run on this TV, or restore cleared it"
@@ -983,15 +1035,15 @@ cmd_home() {
 
 # ADB left on — classic TCP 5555 above all, which is unencrypted and advertised over mDNS — lets
 # anything on the network that gets past the authorisation prompt run commands on the TV. This turns
-# it off; the connection goes with it.
+# it off; the connection goes with it. A reboot is no substitute, and the message no longer offers
+# one: the Sharp's port 5555, opened with 'adb tcpip', answered again 37 seconds after a reboot.
 cmd_adb_off() {
     if [ -n "$DRY_RUN" ]; then echo "  would turn off ADB debugging (adb_enabled, adb_wifi_enabled)"; return 0; fi
     sh_ 'settings put global adb_wifi_enabled 0; settings put global adb_enabled 0' >/dev/null 2>&1 || true
     if alive; then
         die "$DEVICE still answers; turn off USB/ADB debugging and wireless debugging under Developer options"
     fi
-    echo "ADB debugging is off. Turn it back on under Developer options to use this tool again;"
-    echo "a reboot also clears a port opened with 'adb tcpip'."
+    echo "ADB debugging is off. Turn it back on under Developer options to use this tool again."
 }
 
 # F-Droid ships no LEANBACK_LAUNCHER icon, so it never appears on a TV home screen.
@@ -1037,7 +1089,7 @@ env: DEVICE           ip:port or serial (auto-detected when exactly one is attac
      TWEAK_STATE      where the per-TV state lives (default above)
      TWEAK_CONF       another packages.conf
      TWEAK_MEDIA_APPS replace the profile's media_apps
-     TWEAK_TIMEOUT    seconds before an adb call is given up (default 60)
+     TWEAK_TIMEOUT    seconds before an adb call, or the wait for the TV's debugging prompt, is given up (default 60)
 EOF
 }
 
