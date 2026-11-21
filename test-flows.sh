@@ -25,13 +25,27 @@ cat > "$T/bin/adb" <<'EOF'
 S=$FAKE_TV
 if [ "$1" = -s ]; then shift 2; fi
 case $1 in
-    devices) echo 'List of devices attached'; [ -e "$S/unplugged" ] || printf '127.0.0.1:5555\tdevice\n' ;;
-    mdns|disconnect) ;;
-    # no_route: what macOS answers a program it keeps off the local network.
-    connect) if [ -e "$S/no_route" ]; then echo "failed to connect to '$2': No route to host"; else echo "already connected to $2"; fi ;;
+    devices) echo 'List of devices attached'
+             if [ -s "$S/unauthorised" ]; then printf '127.0.0.1:5555\tunauthorized\n'
+             elif [ ! -e "$S/unplugged" ]; then printf '127.0.0.1:5555\tdevice\n'
+             fi ;;
+    mdns) ;;
+    disconnect) echo "$2" >> "$S/disconnects" ;;
+    # no_route: what macOS answers a program it keeps off the local network. unauthorised: a TV that
+    # does not know this computer's key; the file holds how many shell calls it turns away before
+    # somebody accepts the prompt on its screen.
+    connect) if [ -e "$S/no_route" ]; then echo "failed to connect to '$2': No route to host"
+             elif [ -s "$S/unauthorised" ]; then echo "failed to authenticate to $2"
+             else echo "already connected to $2"
+             fi ;;
     shell)
         shift
         n=$(( $(cat "$S/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/calls"
+        if [ -s "$S/unauthorised" ]; then
+            left=$(( $(cat "$S/unauthorised") - 1 ))
+            if [ "$left" -gt 0 ]; then echo "$left" > "$S/unauthorised"; else rm -f "$S/unauthorised"; fi
+            echo 'error: device unauthorized.' >&2; exit 1
+        fi
         if [ -e "$S/unplugged" ] || [ -e "$S/no_route" ] || [ "$(cat "$S/settings/global/adb_enabled" 2>/dev/null)" = 0 ] \
             || { [ -e "$S/offline_after" ] && [ "$n" -gt "$(cat "$S/offline_after")" ]; }; then
             echo "error: device '127.0.0.1:5555' not found" >&2; exit 1
@@ -152,14 +166,16 @@ chmod +x "$T/bin/adb" "$T/dev"/*
 
 # tv <name> [profile]: a fresh simulated Fire TV Stick 4K Max built from the profile's own lists.
 tv() {
-    S=$T/tv-$1; P=$ROOT/devices/${2:-firetv-stick-4k-max-2023}
+    # Not P, which the tests use for a scratch profile they edit: with P set here, an edit made after
+    # tv landed in the clone's own devices/.
+    S=$T/tv-$1; src=$ROOT/devices/${2:-firetv-stick-4k-max-2023}
     rm -rf "$S"; mkdir -p "$S/settings/global" "$S/settings/secure" "$S/settings/system"
     {
-        awk '$1 !~ /^#/ && NF >= 2 {print $2}' "$P/packages.conf"
-        grep -v '^#' "$P/keep.conf"
+        awk '$1 !~ /^#/ && NF >= 2 {print $2}' "$src/packages.conf"
+        grep -v '^#' "$src/keep.conf"
         printf 'com.example.userapp\ncom.example.userdisabled\n'
     } | sort -u > "$S/installed"
-    awk '$1 == "blocked" {print $2}' "$P/packages.conf" > "$S/protected"
+    awk '$1 == "blocked" {print $2}' "$src/packages.conf" > "$S/protected"
     printf 'com.amazon.dummy.music\ncom.example.userdisabled\n' > "$S/disabled"
     : > "$S/thirdparty"
     cat > "$S/props" <<PROPS
@@ -228,6 +244,18 @@ tv nr; touch "$T/tv-nr/no_route"
 case $(uname -s) in Darwin) want="Local Network privacy" ;; *) want="no shell on" ;; esac
 t "a TV adb cannot reach says why, Local Network privacy on macOS" "yes" \
   "$(run nr verify 2>&1 | grep -q "$want" && echo yes || echo no)"
+
+# A TV that does not know this computer's key, or has forgotten it after a week unused, asks on its
+# screen. The run waits on that connection for the answer: three quick retries, each with a disconnect,
+# used to end it before anybody could reach the remote.
+tv au; echo 2 > "$T/tv-au/unauthorised"
+out=$(FAKE_TV=$T/tv-au FAKE_DEV=$T/dev ADB=$T/bin/adb TWEAK_STATE=$T/state-au sh "$ROOT/tweak.sh" verify 2>&1 >/dev/null) && r=0 || r=$?
+t "a TV that wants authorising is found, and waited on until the prompt is accepted" "0 yes kept" \
+  "$r $(echo "$out" | grep -q 'accept the debugging prompt' && echo yes || echo no) $([ -e "$T/tv-au/disconnects" ] && echo dropped || echo kept)"
+tv au2; echo 99 > "$T/tv-au2/unauthorised"
+out=$(TWEAK_TIMEOUT=2 run au2 verify 2>&1) && r=0 || r=$?
+t "... and when nobody accepts it, the error says so and the next run starts on a fresh connection" "1 yes dropped" \
+  "$r $(echo "$out" | grep -q 'error: 127.0.0.1:5555 has not authorised this computer' && echo yes || echo no) $([ -s "$T/tv-au2/disconnects" ] && echo dropped || echo kept)"
 
 # Asking for help, or making a typo, never reaches the TV.
 tv args
@@ -353,11 +381,25 @@ t "... keeping the restore list and settings" "yes yes" \
   "$([ -s "$(state legacy)/applied.txt" ] && echo yes) $([ -s "$(state legacy)/settings.txt" ] && echo yes)"
 t "... with the oldest snapshot as the baseline" "com.amazon.dummy.music com.example.userdisabled" \
   "$(grep -v '^#' "$(state legacy)/baseline.txt" | tr '\n' ' ' | sed 's/ $//')"
+t "... and the build the TV has now, which that layout never recorded" "Amazon/karat/karat:11/PS8180/0000:user/amz-p,release-keys" \
+  "$(cat "$(state legacy)/build.txt" 2>/dev/null || true)"
 t "... and restore undoes it" "0 3 1.0" \
   "$(TWEAK_SH=$T/legacy/tweak.sh rc legacy restore) $(setting legacy secure location_mode) $(setting legacy global window_animation_scale)"
 copy legacy2; mkdir -p "$T/legacy2/backups/firetv-stick-hd"; echo OTHERSERIAL > "$T/legacy2/backups/firetv-stick-hd/serial.txt"
 tv legacy2; TWEAK_SH=$T/legacy2/tweak.sh run legacy2 verify >/dev/null 2>&1 || true
 t "older state from another TV stays where it is" "yes" "$([ -e "$T/legacy2/backups/firetv-stick-hd/serial.txt" ] && echo yes)"
+# 0.1.0 moved such state without a build, so the firmware warning could never fire for that TV. A
+# baseline without one gets the build of the first run that sees it, a dry run aside.
+tv nb; run nb backup >/dev/null; rm "$(state nb)/build.txt"
+run nb tune --dry-run >/dev/null 2>&1 || true
+t "a dry run leaves a baseline without a build as it found it" "none" "$(ls "$(state nb)/build.txt" 2>/dev/null || echo none)"
+run nb verify >/dev/null 2>&1 || true
+sed 's/PS8180/PS8190/' "$T/tv-nb/props" > "$T/props.tmp" && mv "$T/props.tmp" "$T/tv-nb/props"
+t "... and the next run notes the build, so the firmware update after it is noticed" "yes" \
+  "$(run nb verify 2>/dev/null | grep -q 'WARN the firmware changed' && echo yes || echo no)"
+tv ro; run ro backup >/dev/null; rm "$(state ro)/build.txt"; chmod a-w "$(state ro)"
+t "... while a state directory that cannot be written does not stop verify" 0 "$(rc ro verify)"
+chmod u+w "$(state ro)"
 
 # A second TV of the same model gets its own record, and only when asked.
 tv a; tv b; sed 's/FAKESERIAL0001/FAKESERIAL0002/' "$T/tv-b/props" > "$T/props.tmp" && mv "$T/props.tmp" "$T/tv-b/props"
@@ -412,6 +454,29 @@ t "verify names the tier that sets a drifted setting" "yes" \
 run ota1 restore >/dev/null 2>&1
 t "restore lets updates run again" "enabled null" \
   "$(grep -qx com.amazon.tv.forcedotaupdater.v2 "$T/tv-ota1/disabled" && echo disabled || echo enabled) $(setting ota1 global ota_disable_automatic_update)"
+
+# A profile can give an entry up, as the Sharp's did with what its firmware puts back at every boot.
+# What an earlier run recorded of it is then not drift, since nothing would apply it again, and restore
+# still undoes it.
+copy dp; P=$T/dp/devices/firetv-stick-4k-max-2023
+tv dp; TWEAK_SH=$T/dp/tweak.sh run dp debloat >/dev/null 2>&1; TWEAK_SH=$T/dp/tweak.sh run dp tune >/dev/null 2>&1
+n=$(grep -c . "$(state dp)/applied.txt")
+awk '$2 != "com.amazon.tv.acr"' "$P/packages.conf" > "$P/new"; mv "$P/new" "$P/packages.conf"
+awk '$2 != "animator_duration_scale"' "$P/settings.conf" > "$P/new"; mv "$P/new" "$P/settings.conf"
+grep -vx com.amazon.tv.acr "$T/tv-dp/disabled" > "$T/tv-dp/disabled.new"; mv "$T/tv-dp/disabled.new" "$T/tv-dp/disabled"
+echo 1.0 > "$T/tv-dp/settings/global/animator_duration_scale"
+out=$(TWEAK_SH=$T/dp/tweak.sh run dp verify 2>&1) && r=0 || r=$?
+t "what came back is not drift once the profile no longer has it" "0 yes yes" \
+  "$r $(echo "$out" | grep -q '^  --   com.amazon.tv.acr is enabled again, and the profile no longer lists it$' && echo yes || echo no) $(echo "$out" | grep -q "^  --   animator_duration_scale is '1.0', and the profile no longer sets it$" && echo yes || echo no)"
+t "... and the rest is still accounted for" "yes yes" \
+  "$(echo "$out" | grep -q "^  ok   the other $((n - 1)) still disabled$" && echo yes || echo no) $(echo "$out" | grep -q '^  ok   the other 3 settings hold$' && echo yes || echo no)"
+p=$(grep -vx com.amazon.tv.acr "$(state dp)/applied.txt" | head -1); tier=$(awk -v p="$p" '$2 == p {print $1; exit}' "$P/packages.conf")
+grep -vx "$p" "$T/tv-dp/disabled" > "$T/tv-dp/disabled.new"; mv "$T/tv-dp/disabled.new" "$T/tv-dp/disabled"
+out=$(TWEAK_SH=$T/dp/tweak.sh run dp verify 2>&1) && r=0 || r=$?
+t "... while a package the profile still lists fails as before, and the hint names its tier alone" "1 yes yes" \
+  "$r $(echo "$out" | grep -q "^  FAIL $p was re-enabled$" && echo yes || echo no) $(echo "$out" | grep -q "^  re-run: .* debloat $tier$" && echo yes || echo no)"
+t "... and restore still undoes all of it" "0 null none" \
+  "$(TWEAK_SH=$T/dp/tweak.sh rc dp restore) $(setting dp global animator_duration_scale) $(ls "$(state dp)/applied.txt" "$(state dp)/settings.txt" 2>/dev/null || echo none)"
 
 # adb-off ends the session for good.
 tv off
@@ -578,6 +643,10 @@ t "tv-verify fails on drift and posts the FAIL line as JSON" "1 yes yes" \
 tv vg; touch "$T/tv-vg/unplugged"
 t "tv-verify counts a TV that does not answer as failed" "1 yes" \
   "$(rcv vg firetv-stick-4k-max-2023=127.0.0.1:5555) $(grep -q 'error: no shell' "$T/hook-vg" && echo yes || echo no)"
+# Nobody is at the TV when a timer runs: the report has to say that it wants authorising again.
+tv vu; echo 99 > "$T/tv-vu/unauthorised"
+t "tv-verify reports a TV that has forgotten this computer's key in those words" "1 yes" \
+  "$(TWEAK_TIMEOUT=2 rcv vu firetv-stick-4k-max-2023=127.0.0.1:5555) $(grep -q 'has not authorised this computer' "$T/hook-vu" && echo yes || echo no)"
 t "tv-verify refuses a target without a profile, a bad profile name and a plain-http webhook before connecting" "2 2 2" \
   "$(rcv vf 127.0.0.1:5555) $(rcv vf 'bad profile=127.0.0.1:5555') $(rcv vf --webhook http://hook.example.invalid/x firetv-stick-4k-max-2023=127.0.0.1:5555)"
 

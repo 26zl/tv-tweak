@@ -58,9 +58,15 @@ on plain port 53 is bypassed unless it is the one serving DoT.
 Port 5555 is plain, unencrypted ADB, advertised over mDNS, and the authorisation prompt is the
 only thing between the network and a shell on the TV. Turn it off when you are done
 (`./tweak.sh adb-off`) and back on when you next need the tool; the Sharp's README has the
-Ethernet routine, which needs repeating after every reboot. On a flat LAN the firewall cannot help,
-because the switch forwards between the TV and everything else without asking the router; on a
-VLAN of its own (below) the router admits 5555 from your workstation only.
+Ethernet routine. A reboot is not a way to close it: the Sharp's port 5555 answered again 37
+seconds after one. On a flat LAN the firewall cannot help, because the switch forwards between
+the TV and everything else without asking the router; on a VLAN of its own (below) the router
+admits 5555 from your workstation only.
+
+The authorisation lapses by itself: Android forgets an adb key that has not connected for seven
+days, and the TV then asks again on its screen. `tweak.sh` waits `TWEAK_TIMEOUT` seconds, a
+minute by default, for somebody to accept it; a run with nobody at the TV ends with
+`has not authorised this computer`.
 
 A cheap check from the monitoring you already have: a TCP probe of 5555 on each TV that should be
 closed. A port that answers when you did not arm it is worth an alert, and a Google TV set's 6466
@@ -95,11 +101,14 @@ for the VLAN below, and the one TV `verify` can watch on a timer.
 
 ## verify on a timer
 
-Firmware updates bring packages back and reset settings, and nobody runs `verify` on a Tuesday.
+Reboots and firmware updates can bring packages back and reset settings, and nobody runs `verify`
+on a Tuesday.
 [`homelab/tv-verify.sh`](../homelab/tv-verify.sh) runs it against each TV named on the command
 line and posts the FAIL and WARN lines to a webhook when any TV failed; a TV that does not answer
 counts as failed, because a stick whose ADB went away has drifted too. It needs ADB reachable, so
-it fits a TV whose ADB stays on anyway, not one you `adb-off`.
+it fits a TV whose ADB stays on anyway, not one you `adb-off`. A daily run also keeps the adb key
+in use, so the TV does not forget it; one that was unreachable for more than a week comes back
+asking for authorisation, and the report says so.
 
 ```sh
 WEBHOOK_URL=https://discord.com/api/webhooks/... homelab/tv-verify.sh firetv-stick-4k-max-2023=192.0.2.11:5555
@@ -121,7 +130,9 @@ the honest state of most homelabs.
 
 ## Updates
 
-Keep firmware updates on; the `ota` tier is opt-in for a reason. Then expect them to undo some
-of your work: one update on the Sharp brought back the on-screen manual and set
-`animator_duration_scale` to 1.0 again. `verify` named both, `debloat cruft` and `tune` put them
-back, and `verify` after every update, or the timer above, is what catches the next one.
+Keep firmware updates on; the `ota` tier is opt-in for a reason. An update can add packages or
+bring disabled ones back, and it always reboots the TV, which on some firmware is enough by
+itself: what looked like an update undoing work on the Sharp (the on-screen manual back,
+`animator_duration_scale` at 1.0 again) is what that TV does at every boot, and its profile no
+longer sets either. `verify` after an update, or the timer above, tells the two apart: it warns
+when the build changed, and names what drifted.

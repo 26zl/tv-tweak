@@ -138,7 +138,8 @@ entry are harmless; `device.conf` is read as data and never executed.
 `verify` checks the DRM props named in `device.conf`, that nothing kept is disabled, that disabled
 packages stayed disabled, that settings held, that sideloads are present, and that the home screen
 resolves to an accepted launcher. `--deep` also launches each installed streaming app; it takes
-over the TV.
+over the TV. A recorded package or setting that the profile has since dropped is reported, not
+failed, when the TV has put it back: nothing would apply it again, and `restore` still clears it.
 
 **Firmware updates stay on by default.** Each profile has an `ota` tier that disables the
 updaters it can, and on Fire TV sets `ota_disable_automatic_update`, but it is opt-in
@@ -151,6 +152,7 @@ does), update, and run `debloat` and `verify` again.
 especially, which is unencrypted and advertised over mDNS — lets anything on the network that gets
 past the authorisation prompt run commands on the TV. `./tweak.sh adb-off` turns it off (the tool
 cannot reach the TV afterwards); turn it back on under Developer options when you next need it.
+Do not count on a reboot to close the port: the Sharp's answers again after one.
 
 `verify` shows the DRM flags are advertised, not that a licence was fetched. Playback was confirmed
 by hand on each verified device after the full debloat and `tune`.
@@ -197,6 +199,11 @@ set up on your DNS resolver.
   nothing) under System Settings → Privacy & Security → Local Network, then run `adb kill-server`
   and try again: the adb server keeps the permission of whichever app started it, Android Studio
   for one. The same block hides the TV from adb's mDNS discovery, so "no device" can be this too.
+- **"… has not authorised this computer"**: the TV does not know this computer's adb key, or has
+  forgotten it: Android drops a key that has not connected for seven days. `tweak.sh` waits
+  `TWEAK_TIMEOUT` seconds for the prompt on the TV's screen to be accepted; wake the TV, run the
+  command again, and accept with *Always allow from this computer* ticked. If no prompt shows,
+  pair again with `adb pair`, as for a first connection over wireless debugging.
 - **"this TV (serial …) is new to profile …"**: `DEVICE` points at a TV the profile has not
   changed before. Fix `DEVICE`, or add `--new-device` once for a second TV of the same model.
 - **"this TV is '…', but profile … was built for '…'"**: the profile is for another device. Compare
@@ -237,7 +244,7 @@ Every command that changes something prints the path.
   snapshot-*.txt   every later `backup`
   applied.txt      what the tool disabled; the exact input to `restore`
   settings.txt     every setting written, as `<namespace> <key> <applied> <original>`
-  build.txt        the firmware build the TV had at the first backup
+  build.txt        the firmware build at the first backup, or the first run on state older than 0.1.0
   log.txt          one line per run that changed something, in UTC
 ```
 
